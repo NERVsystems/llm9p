@@ -191,18 +191,53 @@ ANTHROPIC_API_KEY=sk-... ./llm9p -debug
 
 This logs all 9P messages sent and received.
 
-### Test with 9p Client
+### Test with 9p Client (plan9port)
 
 ```bash
 # Using 9pfuse
 9pfuse localhost:5640 /mnt/llm
 
-# Using Plan 9's 9p tool
+# Using Plan 9's 9p tool (no mount needed)
 9p -a localhost:5640 ls llm
 9p -a localhost:5640 read llm/model
+9p -a localhost:5640 read llm/temperature
+9p -a localhost:5640 write llm/ask "What is 2+2?"
+9p -a localhost:5640 read llm/ask        # Returns "4"
+9p -a localhost:5640 read llm/tokens     # Returns token count
+
+# Multi-turn conversation
+9p -a localhost:5640 write llm/ask "Remember the number 42"
+9p -a localhost:5640 write llm/ask "What number did I just mention?"
+9p -a localhost:5640 read llm/ask        # Returns "42"
+
+# Add system message (e.g., persona)
+9p -a localhost:5640 write llm/context "Respond like a pirate"
 9p -a localhost:5640 write llm/ask "Hello"
-9p -a localhost:5640 read llm/ask
+9p -a localhost:5640 read llm/ask        # Pirate-style response
+
+# Reset conversation
+9p -a localhost:5640 write llm/new "reset"
 ```
+
+### Test with Infernode (Inferno OS)
+
+```bash
+# Start infernode (from infernode directory)
+./emu
+
+# Inside infernode shell:
+mkdir /n/llm
+mount -A tcp!127.0.0.1!5640 /n/llm
+ls -l /n/llm
+cat /n/llm/model
+echo 'What is the capital of France?' > /n/llm/ask
+cat /n/llm/ask
+```
+
+**Infernode Notes:**
+- Use `127.0.0.1` not `localhost` (DNS resolution differs)
+- Create mount point before mounting: `mkdir /n/llm`
+- The `-A` flag enables anonymous auth
 
 ### Common Issues
 
@@ -254,6 +289,30 @@ func (f *MyFile) Stat() protocol.Stat {
 }
 ```
 
+## Verified Test Cases
+
+The following scenarios have been tested and verified working:
+
+### plan9port (9p tool)
+- [x] `ls llm` - List filesystem root
+- [x] `read llm/model` - Returns model name
+- [x] `read llm/temperature` - Returns temperature
+- [x] `read llm/tokens` - Returns 0 initially, updates after queries
+- [x] `read llm/_example` - Returns usage examples
+- [x] `write llm/temperature "0.5"` - Updates temperature setting
+- [x] `write llm/ask "What is 2+2?"` followed by `read llm/ask` - Returns "4"
+- [x] Multi-turn conversation maintains context
+- [x] `write llm/context "Respond like a pirate"` - System message works
+- [x] `write llm/new "reset"` - Clears conversation history
+
+### Infernode (Inferno OS)
+- [x] `mount -A tcp!127.0.0.1!5640 /n/llm` - Mounts successfully
+- [x] `ls -l /n/llm` - Lists all files with correct permissions
+- [x] `cat /n/llm/model` - Returns model name
+- [x] `cat /n/llm/temperature` - Returns temperature
+- [x] `echo 'prompt' > /n/llm/ask` followed by `cat /n/llm/ask` - Full LLM interaction works
+- [x] LLM correctly identifies client as Inferno OS when asked
+
 ## Future Enhancements
 
 - [ ] Multiple conversation support (via subdirectories)
@@ -269,3 +328,4 @@ func (f *MyFile) Stat() protocol.Stat {
 - [9P Protocol Specification](http://man.cat-v.org/plan_9/5/intro)
 - [Anthropic API Documentation](https://docs.anthropic.com/)
 - [Plan 9 from User Space](https://9fans.github.io/plan9port/)
+- [Infernode](https://github.com/NERVsystems/infernode) - Hosted Inferno OS with native 9P support
