@@ -14,6 +14,7 @@ func NewRoot(client llm.Backend) protocol.Dir {
 	root.AddChild(NewAskFile(client))
 	root.AddChild(NewModelFile(client))
 	root.AddChild(NewTemperatureFile(client))
+	root.AddChild(NewSystemFile(client))
 	root.AddChild(NewTokensFile(client))
 	root.AddChild(NewNewFile(client))
 	root.AddChild(NewContextFile(client))

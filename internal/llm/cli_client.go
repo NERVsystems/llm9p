@@ -15,14 +15,15 @@ import (
 // CLIClient uses the Claude Code CLI for LLM requests.
 // This allows using a Claude Max subscription instead of API tokens.
 type CLIClient struct {
-	mu          sync.RWMutex
-	model       string
-	temperature float64
-	messages    []Message
-	lastTokens  int
-	streaming   bool
-	streamChan  chan string
-	streamDone  chan struct{}
+	mu           sync.RWMutex
+	model        string
+	temperature  float64
+	systemPrompt string
+	messages     []Message
+	lastTokens   int
+	streaming    bool
+	streamChan   chan string
+	streamDone   chan struct{}
 }
 
 // cliResponse represents the JSON response from claude CLI
@@ -85,6 +86,20 @@ func (c *CLIClient) SetTemperature(temp float64) error {
 	return nil
 }
 
+// SystemPrompt returns the current system prompt
+func (c *CLIClient) SystemPrompt() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.systemPrompt
+}
+
+// SetSystemPrompt sets the system prompt for subsequent requests
+func (c *CLIClient) SetSystemPrompt(prompt string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.systemPrompt = prompt
+}
+
 // LastTokens returns the token count from the last response
 // Note: CLI doesn't provide token counts, so this is always 0
 func (c *CLIClient) LastTokens() int {
@@ -138,9 +153,14 @@ func (c *CLIClient) buildPrompt() string {
 	return strings.Join(parts, "\n\n")
 }
 
-// getSystemPrompt extracts system messages as a single string
+// getSystemPrompt builds the full system prompt from dedicated prompt and history
 func (c *CLIClient) getSystemPrompt() string {
 	var systems []string
+	// Add dedicated system prompt first
+	if c.systemPrompt != "" {
+		systems = append(systems, c.systemPrompt)
+	}
+	// Also include system messages from conversation history
 	for _, msg := range c.messages {
 		if msg.Role == "system" {
 			systems = append(systems, msg.Content)

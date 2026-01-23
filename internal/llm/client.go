@@ -19,15 +19,16 @@ type Message struct {
 
 // Client wraps the Anthropic API client with conversation state
 type Client struct {
-	client      anthropic.Client
-	mu          sync.RWMutex
-	model       string
-	temperature float64
-	messages    []Message
-	lastTokens  int
-	streaming   bool
-	streamChan  chan string
-	streamDone  chan struct{}
+	client       anthropic.Client
+	mu           sync.RWMutex
+	model        string
+	temperature  float64
+	systemPrompt string
+	messages     []Message
+	lastTokens   int
+	streaming    bool
+	streamChan   chan string
+	streamDone   chan struct{}
 }
 
 // NewClient creates a new LLM client
@@ -71,6 +72,20 @@ func (c *Client) SetTemperature(temp float64) error {
 	defer c.mu.Unlock()
 	c.temperature = temp
 	return nil
+}
+
+// SystemPrompt returns the current system prompt
+func (c *Client) SystemPrompt() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.systemPrompt
+}
+
+// SetSystemPrompt sets the system prompt for subsequent requests
+func (c *Client) SetSystemPrompt(prompt string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.systemPrompt = prompt
 }
 
 // LastTokens returns the token count from the last response
@@ -118,14 +133,21 @@ func (c *Client) Ask(ctx context.Context, prompt string) (string, error) {
 	// Add user message to history
 	c.messages = append(c.messages, Message{Role: "user", Content: prompt})
 
-	// Build the API messages
+	// Build the API messages from conversation history
 	apiMessages := make([]anthropic.MessageParam, 0, len(c.messages))
 	var systemBlocks []anthropic.TextBlockParam
+
+	// Add dedicated system prompt first
+	if c.systemPrompt != "" {
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+			Text: c.systemPrompt,
+		})
+	}
 
 	for _, msg := range c.messages {
 		switch msg.Role {
 		case "system":
-			// Collect system messages
+			// Also include system messages from conversation history
 			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
 				Text: msg.Content,
 			})
@@ -197,13 +219,21 @@ func (c *Client) StartStream(ctx context.Context, prompt string) error {
 	// Add user message to history
 	c.messages = append(c.messages, Message{Role: "user", Content: prompt})
 
-	// Build the API messages
+	// Build the API messages from conversation history
 	apiMessages := make([]anthropic.MessageParam, 0, len(c.messages))
 	var systemBlocks []anthropic.TextBlockParam
+
+	// Add dedicated system prompt first
+	if c.systemPrompt != "" {
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+			Text: c.systemPrompt,
+		})
+	}
 
 	for _, msg := range c.messages {
 		switch msg.Role {
 		case "system":
+			// Also include system messages from conversation history
 			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
 				Text: msg.Content,
 			})

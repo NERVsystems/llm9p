@@ -16,11 +16,13 @@ Configuration:
   echo "claude-3-haiku-20240307" > model   # Change model
   cat temperature                # View current temperature (0.0-2.0)
   echo "0.5" > temperature       # Set temperature
+  cat system                     # View current system prompt
+  echo "You are a helpful coding assistant." > system  # Set system prompt
 
 Conversation Management:
   cat context                    # View conversation history (JSON)
-  echo "You are a helpful assistant." > context  # Add system message
-  echo "" > new                  # Reset conversation
+  echo "Additional context..." > context  # Add system message to history
+  echo "" > new                  # Reset conversation (keeps system prompt)
 
 Token Usage:
   cat tokens                     # View tokens from last response
@@ -51,9 +53,10 @@ Files:
   ask          Read/write: prompt goes in, response comes out (sync)
   model        Read/write: current model name
   temperature  Read/write: sampling temperature (0.0-2.0)
+  system       Read/write: system prompt (persists across resets)
   tokens       Read-only: token count from last response
-  new          Write-only: any write resets conversation
-  context      Read: JSON history; Write: add system message
+  new          Write-only: any write resets conversation (keeps system prompt)
+  context      Read: JSON history; Write: add system message to history
   _example     Read-only: this help text
   stream/ask   Write-only: starts a streaming request
   stream/chunk Read-only: returns next chunk (blocks), EOF when done

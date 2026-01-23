@@ -141,6 +141,12 @@ echo "claude-3-haiku-20240307" > /mnt/llm/model
 # Adjust temperature
 echo "0.5" > /mnt/llm/temperature
 
+# Set a system prompt (persists across conversation resets)
+echo "You are a helpful coding assistant." > /mnt/llm/system
+
+# View current system prompt
+cat /mnt/llm/system
+
 # View conversation history
 cat /mnt/llm/context
 
@@ -161,6 +167,7 @@ cat /mnt/llm/_example
 ├── ask              # Write prompt, read response (same file)
 ├── model            # Read/write: current model name
 ├── temperature      # Read/write: temperature float (0.0-2.0)
+├── system           # Read/write: system prompt (persists across resets)
 ├── tokens           # Read-only: last response token count
 ├── new              # Write anything to start fresh conversation
 ├── context          # Read: conversation history; Write: add system message
@@ -177,9 +184,10 @@ cat /mnt/llm/_example
 | `ask` | Returns last LLM response | Sends prompt to LLM (sync), stores response |
 | `model` | Returns current model name | Sets model for subsequent requests |
 | `temperature` | Returns current temperature | Sets temperature (0.0-2.0) |
+| `system` | Returns current system prompt | Sets system prompt (persists across resets) |
 | `tokens` | Returns last response token count | Permission denied |
-| `new` | Permission denied | Any write resets conversation state |
-| `context` | Returns JSON conversation history | Appends system message to context |
+| `new` | Permission denied | Any write resets conversation (keeps system prompt) |
+| `context` | Returns JSON conversation history | Appends system message to history |
 | `_example` | Returns usage examples | Permission denied |
 | `stream/ask` | Permission denied | Starts a streaming request |
 | `stream/chunk` | Blocks until next chunk, returns it | Permission denied |

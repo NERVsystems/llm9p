@@ -14,15 +14,19 @@ type Backend interface {
 	Temperature() float64
 	// SetTemperature sets the temperature (0.0-2.0)
 	SetTemperature(temp float64) error
+	// SystemPrompt returns the current system prompt
+	SystemPrompt() string
+	// SetSystemPrompt sets the system prompt
+	SetSystemPrompt(prompt string)
 	// LastTokens returns token count from last response
 	LastTokens() int
 	// Messages returns conversation history
 	Messages() []Message
 	// MessagesJSON returns conversation history as JSON
 	MessagesJSON() ([]byte, error)
-	// AddSystemMessage adds a system message
+	// AddSystemMessage adds a system message to conversation history
 	AddSystemMessage(content string)
-	// Reset clears conversation history
+	// Reset clears conversation history (but preserves system prompt)
 	Reset()
 	// Ask sends a prompt and returns the response (blocking)
 	Ask(ctx context.Context, prompt string) (string, error)

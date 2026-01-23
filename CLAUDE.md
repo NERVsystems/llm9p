@@ -71,6 +71,7 @@ llm9p/
 │       ├── root.go           # Root directory construction
 │       ├── ask.go            # Ask file (shim pattern)
 │       ├── state.go          # Model, temperature files
+│       ├── system.go         # System prompt file
 │       ├── tokens.go         # Read-only token counter
 │       ├── new.go            # Conversation reset trigger
 │       ├── context.go        # Conversation history
@@ -215,10 +216,14 @@ This logs all 9P messages sent and received.
 9p -a localhost:5640 write llm/ask "What number did I just mention?"
 9p -a localhost:5640 read llm/ask        # Returns "42"
 
-# Add system message (e.g., persona)
-9p -a localhost:5640 write llm/context "Respond like a pirate"
+# Set system prompt (e.g., persona)
+9p -a localhost:5640 write llm/system "Respond like a pirate"
 9p -a localhost:5640 write llm/ask "Hello"
 9p -a localhost:5640 read llm/ask        # Pirate-style response
+
+# System prompt persists across resets
+9p -a localhost:5640 write llm/new "reset"
+9p -a localhost:5640 read llm/system     # Still "Respond like a pirate"
 
 # Reset conversation
 9p -a localhost:5640 write llm/new "reset"
@@ -307,8 +312,9 @@ The following scenarios have been tested and verified working:
 - [x] `write llm/temperature "0.5"` - Updates temperature setting
 - [x] `write llm/ask "What is 2+2?"` followed by `read llm/ask` - Returns "4"
 - [x] Multi-turn conversation maintains context
-- [x] `write llm/context "Respond like a pirate"` - System message works
-- [x] `write llm/new "reset"` - Clears conversation history
+- [x] `write llm/system "Respond like a pirate"` - System prompt works
+- [x] System prompt persists across conversation resets
+- [x] `write llm/new "reset"` - Clears conversation history (keeps system prompt)
 
 ### Infernode (Inferno OS)
 - [x] `mount -A tcp!127.0.0.1!5640 /n/llm` - Mounts successfully
