@@ -158,12 +158,18 @@ func (c *CLIClient) Ask(ctx context.Context, prompt string) (string, error) {
 	model := c.model
 	c.mu.Unlock()
 
-	// Build claude CLI command
+	// Build claude CLI command.
+	// --print: non-interactive mode, output to stdout
+	// --output-format json: structured output we can parse
+	// --allowedTools "": disable all tools (text-only, no Bash/Edit/etc.)
+	//
+	// Note: --dangerously-skip-permissions is NOT needed when tools are disabled
+	// and --print mode is used. The CLI only prompts for permission when tools
+	// might take actions. With tools disabled, it's purely text-in/text-out.
 	args := []string{
 		"--print",
 		"--output-format", "json",
 		"--model", model,
-		"--dangerously-skip-permissions",
 		"--allowedTools", "",
 	}
 
@@ -268,12 +274,11 @@ func (c *CLIClient) StartStream(ctx context.Context, prompt string) error {
 			c.mu.Unlock()
 		}()
 
-		// Build command
+		// Build command (same flags as Ask - see comments there)
 		args := []string{
 			"--print",
 			"--output-format", "json",
 			"--model", model,
-			"--dangerously-skip-permissions",
 			"--allowedTools", "",
 		}
 
