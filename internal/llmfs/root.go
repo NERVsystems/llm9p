@@ -7,38 +7,23 @@ import (
 )
 
 // NewRoot creates the root directory of the LLM filesystem.
-// It takes a SessionManager which provides per-fid session isolation
-// and access to the underlying backend for global settings.
+// This implements the clone-based session architecture (CSP compliant):
+//
+//	/n/llm/
+//	├── new              # Read to create session, returns ID
+//	├── 0/               # Session 0 (fully independent)
+//	│   ├── ask
+//	│   ├── context
+//	│   ├── ctl
+//	│   ├── model
+//	│   ├── temperature
+//	│   ├── system
+//	│   ├── thinking
+//	│   └── prefill
+//	├── 1/               # Session 1 (fully independent)
+//	└── ...
+//
+// No global files. Each session is isolated with its own settings.
 func NewRoot(sm *llm.SessionManager) protocol.Dir {
-	backend := sm.Backend()
-	root := protocol.NewStaticDir("llm")
-
-	// Session-aware files (per-fid isolation)
-	root.AddChild(NewAskFile(sm))
-	root.AddChild(NewNewFile(sm))
-	root.AddChild(NewContextFile(sm))
-
-	// Global settings files (shared across all fids)
-	root.AddChild(NewModelFile(backend))
-	root.AddChild(NewTemperatureFile(backend))
-	root.AddChild(NewSystemFile(backend))
-	root.AddChild(NewThinkingFile(backend))
-	root.AddChild(NewPrefillFile(backend))
-
-	// Token tracking (uses backend's global counters)
-	root.AddChild(NewTokensFile(backend))
-	root.AddChild(NewUsageFile(backend))
-	root.AddChild(NewMetricsFile(backend))
-	root.AddChild(NewCompactFile(backend))
-
-	// Static files
-	root.AddChild(NewExampleFile())
-
-	// Add stream directory (uses backend directly)
-	streamDir := protocol.NewStaticDir("stream")
-	streamDir.AddChild(NewStreamAskFile(backend))
-	streamDir.AddChild(NewChunkFile(backend))
-	root.AddChild(streamDir)
-
-	return root
+	return NewSessionsDir(sm)
 }

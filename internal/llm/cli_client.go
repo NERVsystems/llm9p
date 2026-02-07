@@ -646,8 +646,102 @@ func (c *CLIClient) AskWithHistory(ctx context.Context, history []Message, promp
 	// Prepend prefill to response to keep model in character
 	// Note: CLI doesn't support true prefill (partial assistant message),
 	// so we prepend it to the response for consistent behavior with API client
-	if prefill != "" {
+	// Only add if response doesn't already start with it (model may echo from history)
+	if prefill != "" && !strings.HasPrefix(responseText, prefill) {
 		responseText = prefill + responseText
+	}
+
+	// Estimate tokens: prompt + response (chars / 4)
+	tokens := estimateTokens(fullPrompt) + estimateTokens(responseText)
+
+	return responseText, tokens, nil
+}
+
+// AskWithRequest sends a prompt with all settings from the request (CSP - no client state).
+// This is the primary method for the clone-based session architecture.
+// All settings come from the request parameter, making this a stateless API call.
+func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string, int, error) {
+	// Build prompt from provided history
+	var parts []string
+	var systemParts []string
+
+	// Add system prompt from request
+	if req.SystemPrompt != "" {
+		systemParts = append(systemParts, req.SystemPrompt)
+	}
+
+	for _, msg := range req.Messages {
+		switch msg.Role {
+		case "system":
+			systemParts = append(systemParts, msg.Content)
+		case "user":
+			parts = append(parts, fmt.Sprintf("Human: %s", msg.Content))
+		case "assistant":
+			parts = append(parts, fmt.Sprintf("Assistant: %s", msg.Content))
+		}
+	}
+
+	// Add the new user prompt
+	parts = append(parts, fmt.Sprintf("Human: %s", req.Prompt))
+
+	fullPrompt := strings.Join(parts, "\n\n")
+	systemPrompt := strings.Join(systemParts, "\n\n")
+
+	// Use model from request, normalize to CLI alias
+	model := normalizeModel(req.Model)
+	if req.Model == "" {
+		c.mu.RLock()
+		model = c.model
+		c.mu.RUnlock()
+	}
+
+	// Use thinking tokens from request
+	thinkingTokens := req.ThinkingTokens
+
+	// Build claude CLI command
+	args := []string{
+		"--print",
+		"--output-format", "json",
+		"--model", model,
+		"--allowedTools", "",
+		"--dangerously-skip-permissions",
+	}
+
+	if systemPrompt != "" {
+		args = append(args, "--system-prompt", systemPrompt)
+	}
+
+	args = append(args, "-") // Read from stdin
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Stdin = bytes.NewBufferString(fullPrompt)
+
+	// Set thinking token budget via environment variable
+	cmd.Env = append(cmd.Environ(), func() string {
+		if thinkingTokens < 0 {
+			return "MAX_THINKING_TOKENS=31999"
+		}
+		return fmt.Sprintf("MAX_THINKING_TOKENS=%d", thinkingTokens)
+	}())
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", 0, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
+	}
+
+	// Parse JSON response
+	responseText, err := parseJSONResponse(stdout.String())
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to parse CLI response: %w", err)
+	}
+
+	// Prepend prefill to response to keep model in character
+	// Only add if response doesn't already start with it (model may echo from history)
+	if req.Prefill != "" && !strings.HasPrefix(responseText, req.Prefill) {
+		responseText = req.Prefill + responseText
 	}
 
 	// Estimate tokens: prompt + response (chars / 4)

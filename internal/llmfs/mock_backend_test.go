@@ -103,6 +103,14 @@ func (m *MockBackend) AskWithHistory(ctx context.Context, history []llm.Message,
 	return m.askResponse, tokens, nil
 }
 
+func (m *MockBackend) AskWithRequest(ctx context.Context, req llm.AskRequest) (string, int, error) {
+	if m.askError != nil {
+		return "", 0, m.askError
+	}
+	tokens := len(req.Prompt) + len(m.askResponse)
+	return m.askResponse, tokens, nil
+}
+
 func (m *MockBackend) StartStream(ctx context.Context, prompt string) error {
 	return fmt.Errorf("streaming not implemented in mock")
 }

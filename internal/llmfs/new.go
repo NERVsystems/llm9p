@@ -1,57 +1,56 @@
 package llmfs
 
 import (
+	"fmt"
+	"io"
+
 	"github.com/NERVsystems/llm9p/internal/llm"
 	"github.com/NERVsystems/llm9p/internal/protocol"
 )
 
-// NewFile is a write-only file that resets the conversation when written to.
-// It implements FidAwareFile to reset only the session for the writing fid.
+// NewFile is the session factory: /n/llm/new
+// Read creates a new session and returns its ID.
+// This follows the Plan 9 clone pattern (like /net/tcp/clone, Acme windows).
 type NewFile struct {
 	*protocol.BaseFile
 	sm *llm.SessionManager
 }
 
-// NewNewFile creates the new file
+// NewNewFile creates the new file (session factory).
 func NewNewFile(sm *llm.SessionManager) *NewFile {
 	return &NewFile{
-		BaseFile: protocol.NewBaseFile("new", 0222),
+		BaseFile: protocol.NewBaseFile("new", 0444),
 		sm:       sm,
 	}
 }
 
-// Read implements File.Read
+// Read creates a new session and returns its ID.
+// Each read creates a fresh session with default settings.
 func (f *NewFile) Read(p []byte, offset int64) (int, error) {
-	return 0, protocol.ErrPermission
+	// Only create session on first read (offset 0)
+	// Subsequent reads at higher offsets just return the remaining data
+	if offset > 0 {
+		return 0, io.EOF
+	}
+
+	// Create new session
+	id := f.sm.Create()
+
+	// Return session ID
+	content := fmt.Sprintf("%d\n", id)
+	n := copy(p, content)
+	return n, nil
 }
 
-// Write implements File.Write (fallback for non-fid-aware access)
+// Write is not supported - this is a read-only factory.
 func (f *NewFile) Write(p []byte, offset int64) (int, error) {
-	// Without fid context, we can't reset a specific session
 	return 0, protocol.ErrPermission
 }
 
-// ReadFid implements FidAwareFile.ReadFid
-func (f *NewFile) ReadFid(fid uint32, p []byte, offset int64) (int, error) {
-	return 0, protocol.ErrPermission
-}
-
-// WriteFid implements FidAwareFile.WriteFid
-func (f *NewFile) WriteFid(fid uint32, p []byte, offset int64) (int, error) {
-	// Reset only the session for this fid
-	f.sm.Reset(fid)
-	return len(p), nil
-}
-
-// CloseFid implements FidAwareFile.CloseFid
-func (f *NewFile) CloseFid(fid uint32) error {
-	// No per-fid state to clean up for this file
-	return nil
-}
-
-// Stat returns the file's metadata
+// Stat returns the file's metadata.
 func (f *NewFile) Stat() protocol.Stat {
 	s := f.BaseFile.Stat()
+	// Length unknown until read
 	s.Length = 0
 	return s
 }

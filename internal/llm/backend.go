@@ -49,6 +49,9 @@ type Backend interface {
 	// AskWithHistory sends a prompt with explicit message history (for per-fid isolation)
 	// Returns response text and token count
 	AskWithHistory(ctx context.Context, history []Message, prompt string) (string, int, error)
+	// AskWithRequest sends a prompt with all settings from the request (CSP - no client state)
+	// This is the primary method for the clone-based session architecture.
+	AskWithRequest(ctx context.Context, req AskRequest) (string, int, error)
 	// StartStream begins streaming a response
 	StartStream(ctx context.Context, prompt string) error
 	// ReadStreamChunk reads the next streaming chunk

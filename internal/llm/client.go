@@ -612,3 +612,104 @@ func (c *Client) AskWithHistory(ctx context.Context, history []Message, prompt s
 
 	return responseText, tokens, nil
 }
+
+// AskWithRequest sends a prompt with all settings from the request (CSP - no client state).
+// This is the primary method for the clone-based session architecture.
+// All settings come from the request parameter, making this a stateless API call.
+func (c *Client) AskWithRequest(ctx context.Context, req AskRequest) (string, int, error) {
+	// Build API messages from provided history plus the new prompt
+	apiMessages := make([]anthropic.MessageParam, 0, len(req.Messages)+2)
+	var systemBlocks []anthropic.TextBlockParam
+
+	// Add system prompt from request
+	if req.SystemPrompt != "" {
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+			Text: req.SystemPrompt,
+		})
+	}
+
+	for _, msg := range req.Messages {
+		switch msg.Role {
+		case "system":
+			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+				Text: msg.Content,
+			})
+		case "user":
+			apiMessages = append(apiMessages, anthropic.NewUserMessage(
+				anthropic.NewTextBlock(msg.Content),
+			))
+		case "assistant":
+			apiMessages = append(apiMessages, anthropic.NewAssistantMessage(
+				anthropic.NewTextBlock(msg.Content),
+			))
+		}
+	}
+
+	// Add the new user prompt
+	apiMessages = append(apiMessages, anthropic.NewUserMessage(
+		anthropic.NewTextBlock(req.Prompt),
+	))
+
+	// Add prefill as partial assistant message to keep model in character
+	if req.Prefill != "" {
+		apiMessages = append(apiMessages, anthropic.NewAssistantMessage(
+			anthropic.NewTextBlock(req.Prefill),
+		))
+	}
+
+	// Use model from request, or fall back to client default
+	model := req.Model
+	if model == "" {
+		c.mu.RLock()
+		model = c.model
+		c.mu.RUnlock()
+	}
+
+	// Use temperature from request
+	temp := req.Temperature
+
+	// Build request params
+	params := anthropic.MessageNewParams{
+		Model:       anthropic.Model(model),
+		MaxTokens:   4096,
+		Messages:    apiMessages,
+		Temperature: anthropic.Float(temp),
+	}
+
+	// Add system prompt if present
+	if len(systemBlocks) > 0 {
+		params.System = systemBlocks
+	}
+
+	// Make the API call with timing
+	startTime := time.Now()
+	response, err := c.client.Messages.New(ctx, params)
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		return "", 0, fmt.Errorf("API error: %w", err)
+	}
+
+	// Extract response text
+	var responseText string
+	for _, block := range response.Content {
+		if block.Type == "text" {
+			responseText += block.Text
+		}
+	}
+
+	// Prepend prefill to response (it was used as partial assistant message)
+	// Only if response doesn't already start with it (model may echo from history)
+	if req.Prefill != "" && !strings.HasPrefix(responseText, req.Prefill) {
+		responseText = req.Prefill + responseText
+	}
+
+	tokens := int(response.Usage.InputTokens + response.Usage.OutputTokens)
+
+	// Record metrics
+	inputToks := int(response.Usage.InputTokens)
+	outputToks := int(response.Usage.OutputTokens)
+	RecordMetrics(inputToks, outputToks, latencyMs)
+
+	return responseText, tokens, nil
+}

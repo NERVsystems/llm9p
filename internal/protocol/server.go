@@ -272,15 +272,7 @@ func (s *Server) handleRead(state *clientState, payload []byte, buf []byte) ([]b
 	}
 
 	data := make([]byte, count)
-	var n int
-
-	// Check for fid-aware file
-	if faf, ok := file.(FidAwareFile); ok {
-		n, err = faf.ReadFid(msg.Fid, data, int64(msg.Offset))
-	} else {
-		n, err = file.Read(data, int64(msg.Offset))
-	}
-
+	n, err := file.Read(data, int64(msg.Offset))
 	if err != nil && err != io.EOF {
 		return s.errorResponse(buf, err.Error())
 	}
@@ -301,15 +293,7 @@ func (s *Server) handleWrite(state *clientState, payload []byte, buf []byte) ([]
 		return s.errorResponse(buf, ErrBadFid.Error())
 	}
 
-	var n int
-
-	// Check for fid-aware file
-	if faf, ok := file.(FidAwareFile); ok {
-		n, err = faf.WriteFid(msg.Fid, msg.Data, int64(msg.Offset))
-	} else {
-		n, err = file.Write(msg.Data, int64(msg.Offset))
-	}
-
+	n, err := file.Write(msg.Data, int64(msg.Offset))
 	if err != nil {
 		return s.errorResponse(buf, err.Error())
 	}
@@ -328,11 +312,6 @@ func (s *Server) handleClunk(state *clientState, payload []byte, buf []byte) ([]
 	file, exists := state.fids[msg.Fid]
 	if !exists {
 		return s.errorResponse(buf, ErrBadFid.Error())
-	}
-
-	// Call CloseFid for fid-aware files to clean up per-fid state
-	if faf, ok := file.(FidAwareFile); ok {
-		faf.CloseFid(msg.Fid)
 	}
 
 	file.Close()

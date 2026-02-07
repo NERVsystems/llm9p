@@ -36,22 +36,6 @@ type Dir interface {
 	Lookup(name string) (File, error)
 }
 
-// FidAwareFile is implemented by files that need per-fid state.
-// When a file implements this interface, the server will call the
-// fid-aware methods instead of the standard File methods.
-type FidAwareFile interface {
-	File
-
-	// ReadFid reads from the file with fid context
-	ReadFid(fid uint32, p []byte, offset int64) (n int, err error)
-
-	// WriteFid writes to the file with fid context
-	WriteFid(fid uint32, p []byte, offset int64) (n int, err error)
-
-	// CloseFid is called when a fid is clunked
-	CloseFid(fid uint32) error
-}
-
 // pathCounter generates unique path IDs for qids
 var pathCounter uint64
 
