@@ -22,8 +22,11 @@ const (
 	// Version is the protocol version we implement
 	Version = "9P2000"
 
-	// MaxMessageSize is the maximum size of a 9P message
-	MaxMessageSize = 8192
+	// MaxMessageSize is the maximum size of a 9P message.
+	// Must be large enough for system prompts (which can be 10-15KB with
+	// tool documentation and reminders). Inferno's mount() proposes its
+	// own msize; the negotiated size is min(client, server).
+	MaxMessageSize = 65536
 
 	// NoTag is used for Tversion/Rversion which don't use tags
 	NoTag uint16 = 0xFFFF

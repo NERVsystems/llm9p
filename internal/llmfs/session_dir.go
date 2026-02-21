@@ -10,7 +10,7 @@ import (
 )
 
 // SessionDir represents a single session directory: /n/llm/N/
-// Contains: ask, context, ctl, model, temperature, system, thinking, prefill
+// Contains: ask, compact, context, ctl, model, temperature, system, thinking, prefill, usage
 type SessionDir struct {
 	*protocol.BaseFile
 	sm *llm.SessionManager
@@ -35,6 +35,7 @@ func (d *SessionDir) Children() []protocol.File {
 
 	return []protocol.File{
 		NewSessionAskFile(d.sm, d.id),
+		NewSessionCompactFile(d.sm, d.id),
 		NewSessionContextFile(d.sm, d.id),
 		NewSessionCtlFile(d.sm, d.id),
 		NewSessionModelFile(d.sm, d.id),
@@ -42,6 +43,7 @@ func (d *SessionDir) Children() []protocol.File {
 		NewSessionSystemFile(d.sm, d.id),
 		NewSessionThinkingFile(d.sm, d.id),
 		NewSessionPrefillFile(d.sm, d.id),
+		NewSessionUsageFile(d.sm, d.id),
 	}
 }
 
@@ -55,6 +57,8 @@ func (d *SessionDir) Lookup(name string) (protocol.File, error) {
 	switch name {
 	case "ask":
 		return NewSessionAskFile(d.sm, d.id), nil
+	case "compact":
+		return NewSessionCompactFile(d.sm, d.id), nil
 	case "context":
 		return NewSessionContextFile(d.sm, d.id), nil
 	case "ctl":
@@ -69,6 +73,8 @@ func (d *SessionDir) Lookup(name string) (protocol.File, error) {
 		return NewSessionThinkingFile(d.sm, d.id), nil
 	case "prefill":
 		return NewSessionPrefillFile(d.sm, d.id), nil
+	case "usage":
+		return NewSessionUsageFile(d.sm, d.id), nil
 	default:
 		return nil, protocol.ErrNotFound
 	}

@@ -4,6 +4,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -110,6 +112,19 @@ func (s *Session) AddTokens(tokens int) {
 	defer s.mu.Unlock()
 	s.lastTokens = tokens
 	s.totalTokens += tokens
+}
+
+// EstimatedContextTokens returns a rough token estimate for context window usage.
+// Uses 4 chars/token heuristic across all current messages.
+// More accurate than totalTokens (which grows quadratically) for threshold decisions.
+func (s *Session) EstimatedContextTokens() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	total := 0
+	for _, msg := range s.messages {
+		total += len(msg.Content) / 4
+	}
+	return total
 }
 
 // Reset clears the session's conversation history but keeps settings.
@@ -333,6 +348,75 @@ func (sm *SessionManager) ListSessions() []int {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// EstimatedContextTokens returns the estimated token count for a session.
+// Delegates to Session.EstimatedContextTokens().
+func (sm *SessionManager) EstimatedContextTokens(id int) int {
+	session := sm.Get(id)
+	if session == nil {
+		return 0
+	}
+	return session.EstimatedContextTokens()
+}
+
+// ContextLimit returns the context window limit (200K for all Claude models).
+func (sm *SessionManager) ContextLimit() int {
+	return 200000
+}
+
+// Compact summarizes a session's conversation to reduce context window usage.
+// The conversation history is replaced with a compact summary exchange.
+// No-op if the session has fewer than 4 messages (nothing meaningful to compact).
+func (sm *SessionManager) Compact(ctx context.Context, id int) error {
+	session := sm.Get(id)
+	if session == nil {
+		return ErrSessionNotFound
+	}
+
+	session.mu.RLock()
+	msgs := make([]Message, len(session.messages))
+	copy(msgs, session.messages)
+	model := session.model
+	session.mu.RUnlock()
+
+	if len(msgs) < 4 {
+		return nil
+	}
+
+	// Build conversation text for the summarization prompt
+	var sb strings.Builder
+	for _, msg := range msgs {
+		if msg.Role == "system" {
+			continue
+		}
+		sb.WriteString(msg.Role)
+		sb.WriteString(": ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n\n")
+	}
+
+	req := AskRequest{
+		Prompt:      "Summarize this conversation concisely, preserving key facts, decisions, file paths, code snippets, and all context needed to continue the work:\n\n" + sb.String(),
+		Model:       model,
+		Temperature: 0.3,
+	}
+
+	summary, tokens, err := sm.apiClient.AskWithRequest(ctx, req)
+	if err != nil {
+		return fmt.Errorf("compaction LLM call failed: %w", err)
+	}
+
+	// Replace history with a minimal exchange conveying the summary
+	session.mu.Lock()
+	session.messages = []Message{
+		{Role: "user", Content: "Context from earlier in this session:\n" + summary},
+		{Role: "assistant", Content: "Understood. I have the context from our previous work and will continue from there."},
+	}
+	session.totalTokens = tokens
+	session.mu.Unlock()
+
+	return nil
 }
 
 // AskRequest contains all parameters for an API call.

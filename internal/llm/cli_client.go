@@ -387,7 +387,7 @@ func parseJSONResponse(output string) (string, error) {
 			continue // Not valid JSON, try next line
 		}
 
-		if resp.Type == "result" && resp.Result != "" {
+		if resp.Type == "result" {
 			return resp.Result, nil
 		}
 	}
