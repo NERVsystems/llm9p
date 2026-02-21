@@ -44,5 +44,7 @@ func (f *SessionCompactFile) Write(p []byte, offset int64) (int, error) {
 
 // Stat returns the file's metadata.
 func (f *SessionCompactFile) Stat() protocol.Stat {
-	return f.BaseFile.Stat()
+	s := f.BaseFile.Stat()
+	s.Length = uint64(len("write to compact conversation\n"))
+	return s
 }
