@@ -7,10 +7,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 )
+
+// claudeEnv returns the current process environment with CLAUDECODE stripped.
+// The claude CLI refuses to run inside another Claude Code session (CLAUDECODE is set).
+// llm9p is a middleware server, not a Claude Code session, so this is safe to remove.
+func claudeEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "CLAUDECODE=") {
+			env = append(env, e)
+		}
+	}
+	return env
+}
 
 // CLIClient uses the Claude Code CLI for LLM requests.
 // This allows using a Claude Max subscription instead of API tokens.
@@ -227,7 +241,7 @@ func (c *CLIClient) Compact(ctx context.Context) error {
 	cmd.Stdin = bytes.NewBufferString(summaryPrompt)
 
 	// Set thinking token budget
-	cmd.Env = append(cmd.Environ(), func() string {
+	cmd.Env = append(claudeEnv(), func() string {
 		if thinkingTokens < 0 {
 			return "MAX_THINKING_TOKENS=31999"
 		}
@@ -328,7 +342,7 @@ func (c *CLIClient) Ask(ctx context.Context, prompt string) (string, error) {
 
 	// Set thinking token budget via environment variable
 	// -1 = max (31999), 0 = disabled, >0 = specific budget
-	cmd.Env = append(cmd.Environ(), func() string {
+	cmd.Env = append(claudeEnv(), func() string {
 		if thinkingTokens < 0 {
 			return "MAX_THINKING_TOKENS=31999"
 		}
@@ -458,7 +472,7 @@ func (c *CLIClient) StartStream(ctx context.Context, prompt string) error {
 		cmd.Stdin = bytes.NewBufferString(fullPrompt)
 
 		// Set thinking token budget via environment variable
-		cmd.Env = append(cmd.Environ(), func() string {
+		cmd.Env = append(claudeEnv(), func() string {
 			if thinkingTokens < 0 {
 				return "MAX_THINKING_TOKENS=31999"
 			}
@@ -622,7 +636,7 @@ func (c *CLIClient) AskWithHistory(ctx context.Context, history []Message, promp
 	cmd.Stdin = bytes.NewBufferString(fullPrompt)
 
 	// Set thinking token budget via environment variable
-	cmd.Env = append(cmd.Environ(), func() string {
+	cmd.Env = append(claudeEnv(), func() string {
 		if thinkingTokens < 0 {
 			return "MAX_THINKING_TOKENS=31999"
 		}
@@ -717,7 +731,7 @@ func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string,
 	cmd.Stdin = bytes.NewBufferString(fullPrompt)
 
 	// Set thinking token budget via environment variable
-	cmd.Env = append(cmd.Environ(), func() string {
+	cmd.Env = append(claudeEnv(), func() string {
 		if thinkingTokens < 0 {
 			return "MAX_THINKING_TOKENS=31999"
 		}
