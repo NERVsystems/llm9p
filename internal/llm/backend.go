@@ -3,6 +3,38 @@ package llm
 
 import "context"
 
+// AskResponse is returned by AskWithRequest.
+// It carries the formatted 9P response string, optional structured JSON for
+// session history replay (non-empty only when tools are active), and token count.
+type AskResponse struct {
+	// Response is the formatted string written to session.lastResponse.
+	// When tools are defined: "STOP:end_turn\n<text>" or
+	//   "STOP:tool_use\nTOOL:<id>:<name>:<args>\n...<text>"
+	// When no tools: plain response text (backward-compatible).
+	Response string
+
+	// StructuredJSON is a JSON array of content blocks for session history.
+	// Non-empty only when the response contains tool_use blocks.
+	// Stored in Message.StructuredContent for correct API replay.
+	StructuredJSON string
+
+	// Tokens is the total token count (input + output) for this turn.
+	Tokens int
+}
+
+// ToolDef is a tool definition passed to the Anthropic tools API.
+type ToolDef struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"input_schema"`
+}
+
+// ToolResult is a tool execution result submitted back to the LLM.
+type ToolResult struct {
+	ToolUseID string
+	Content   string
+}
+
 // Backend defines the interface for LLM backends.
 // Both API and CLI clients implement this interface.
 type Backend interface {
@@ -49,9 +81,9 @@ type Backend interface {
 	// AskWithHistory sends a prompt with explicit message history (for per-fid isolation)
 	// Returns response text and token count
 	AskWithHistory(ctx context.Context, history []Message, prompt string) (string, int, error)
-	// AskWithRequest sends a prompt with all settings from the request (CSP - no client state)
+	// AskWithRequest sends a prompt with all settings from the request (CSP - no client state).
 	// This is the primary method for the clone-based session architecture.
-	AskWithRequest(ctx context.Context, req AskRequest) (string, int, error)
+	AskWithRequest(ctx context.Context, req AskRequest) (AskResponse, error)
 	// StartStream begins streaming a response
 	StartStream(ctx context.Context, prompt string) error
 	// ReadStreamChunk reads the next streaming chunk

@@ -44,6 +44,7 @@ type Session struct {
 	systemPrompt   string
 	thinkingTokens int
 	prefill        string
+	tools          []ToolDef // native tool definitions (nil = text-only mode)
 
 	mu     sync.RWMutex
 	closed bool
@@ -207,6 +208,37 @@ func (s *Session) SetPrefill(prefill string) {
 	s.prefill = prefill
 }
 
+// Tools returns the session's tool definitions (nil = text-only mode).
+func (s *Session) Tools() []ToolDef {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.tools == nil {
+		return nil
+	}
+	out := make([]ToolDef, len(s.tools))
+	copy(out, s.tools)
+	return out
+}
+
+// SetTools sets the tool definitions for this session.
+// After setting, subsequent Ask calls will use native tool_use protocol.
+func (s *Session) SetTools(tools []ToolDef) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tools = tools
+}
+
+// AddStructuredMessage appends a message with optional structured content.
+func (s *Session) AddStructuredMessage(role, content, structuredJSON string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages = append(s.messages, Message{
+		Role:              role,
+		Content:           content,
+		StructuredContent: structuredJSON,
+	})
+}
+
 // IsClosed returns whether the session has been closed.
 func (s *Session) IsClosed() bool {
 	s.mu.RLock()
@@ -320,22 +352,110 @@ func (sm *SessionManager) Ask(ctx context.Context, id int, prompt string) (strin
 		SystemPrompt:   systemPrompt,
 		ThinkingTokens: thinkingTokens,
 		Prefill:        prefill,
+		ToolDefs:       session.Tools(),
 	}
 
 	// Make API call (stateless)
-	response, tokens, err := sm.apiClient.AskWithRequest(ctx, req)
+	ar, err := sm.apiClient.AskWithRequest(ctx, req)
 	if err != nil {
 		session.SetLastResponse("Error: " + err.Error())
 		return "", err
 	}
 
-	// Update session state
+	// Update session state — store structured content for tool turns
+	textContent := extractTextContent(ar.Response)
 	session.AddMessage("user", prompt)
-	session.AddMessage("assistant", response)
-	session.AddTokens(tokens)
-	session.SetLastResponse(response)
+	session.AddStructuredMessage("assistant", textContent, ar.StructuredJSON)
+	session.AddTokens(ar.Tokens)
+	session.SetLastResponse(ar.Response)
 
-	return response, nil
+	return ar.Response, nil
+}
+
+// AskWithToolResults submits tool execution results as a user turn and gets
+// the next assistant response. Called after parsing TOOL_RESULTS from the ask file.
+func (sm *SessionManager) AskWithToolResults(ctx context.Context, id int, results []ToolResult) (string, error) {
+	session := sm.Get(id)
+	if session == nil {
+		return "", ErrSessionNotFound
+	}
+	if session.IsClosed() {
+		return "", ErrSessionClosed
+	}
+
+	session.mu.RLock()
+	history := make([]Message, len(session.messages))
+	copy(history, session.messages)
+	model := session.model
+	temperature := session.temperature
+	systemPrompt := session.systemPrompt
+	thinkingTokens := session.thinkingTokens
+	session.mu.RUnlock()
+
+	req := AskRequest{
+		Messages:       history,
+		Model:          model,
+		Temperature:    temperature,
+		SystemPrompt:   systemPrompt,
+		ThinkingTokens: thinkingTokens,
+		ToolDefs:       session.Tools(),
+		ToolResults:    results,
+		// Prompt is intentionally empty — tool results ARE the new user turn.
+		// Prefill is intentionally empty — prefill is inappropriate mid-tool-loop.
+	}
+
+	ar, err := sm.apiClient.AskWithRequest(ctx, req)
+	if err != nil {
+		session.SetLastResponse("Error: " + err.Error())
+		return "", err
+	}
+
+	// Store tool_result user turn + assistant response in history
+	toolResultsText := fmt.Sprintf("tool results: %d results submitted", len(results))
+	toolResultsJSON := buildToolResultsJSON(results)
+	session.AddStructuredMessage("user", toolResultsText, toolResultsJSON)
+	textContent := extractTextContent(ar.Response)
+	session.AddStructuredMessage("assistant", textContent, ar.StructuredJSON)
+	session.AddTokens(ar.Tokens)
+	session.SetLastResponse(ar.Response)
+
+	return ar.Response, nil
+}
+
+// extractTextContent extracts the plain text from a STOP:-formatted response.
+// For plain-text (no-tools) responses, returns the response as-is.
+func extractTextContent(response string) string {
+	if !strings.HasPrefix(response, "STOP:") {
+		return response
+	}
+	// Skip STOP: line and TOOL: lines, return the text portion
+	lines := strings.SplitN(response, "\n", -1)
+	var text []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "STOP:") || strings.HasPrefix(line, "TOOL:") {
+			continue
+		}
+		text = append(text, line)
+	}
+	return strings.Join(text, "\n")
+}
+
+// buildToolResultsJSON builds the JSON content blocks for a tool_results user turn.
+// Stored in Message.StructuredContent for proper API replay.
+func buildToolResultsJSON(results []ToolResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, r := range results {
+		content := strings.ReplaceAll(r.Content, `\`, `\\`)
+		content = strings.ReplaceAll(content, `"`, `\"`)
+		content = strings.ReplaceAll(content, "\n", `\n`)
+		content = strings.ReplaceAll(content, "\r", `\r`)
+		toolUseID := strings.ReplaceAll(r.ToolUseID, `"`, `\"`)
+		parts = append(parts, fmt.Sprintf(`{"type":"tool_result","tool_use_id":"%s","content":"%s"}`, toolUseID, content))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // ListSessions returns the IDs of all active sessions.
@@ -402,7 +522,7 @@ func (sm *SessionManager) Compact(ctx context.Context, id int) error {
 		Temperature: 0.3,
 	}
 
-	summary, tokens, err := sm.apiClient.AskWithRequest(ctx, req)
+	ar, err := sm.apiClient.AskWithRequest(ctx, req)
 	if err != nil {
 		return fmt.Errorf("compaction LLM call failed: %w", err)
 	}
@@ -410,10 +530,10 @@ func (sm *SessionManager) Compact(ctx context.Context, id int) error {
 	// Replace history with a minimal exchange conveying the summary
 	session.mu.Lock()
 	session.messages = []Message{
-		{Role: "user", Content: "Context from earlier in this session:\n" + summary},
+		{Role: "user", Content: "Context from earlier in this session:\n" + ar.Response},
 		{Role: "assistant", Content: "Understood. I have the context from our previous work and will continue from there."},
 	}
-	session.totalTokens = tokens
+	session.totalTokens = ar.Tokens
 	session.mu.Unlock()
 
 	return nil
@@ -422,12 +542,14 @@ func (sm *SessionManager) Compact(ctx context.Context, id int) error {
 // AskRequest contains all parameters for an API call.
 type AskRequest struct {
 	Messages       []Message
-	Prompt         string
+	Prompt         string  // empty when ToolResults is set (tool_results IS the new user turn)
 	Model          string
 	Temperature    float64
 	SystemPrompt   string
 	ThinkingTokens int
 	Prefill        string
+	ToolDefs       []ToolDef    // non-nil enables native tool_use protocol
+	ToolResults    []ToolResult // non-nil: submit tool results as a new user turn
 }
 
 // Errors

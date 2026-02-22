@@ -13,10 +13,13 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-// Message represents a single message in a conversation
+// Message represents a single message in a conversation.
+// StructuredContent, when non-empty, holds a JSON array of content blocks
+// for proper API replay of tool-use turns. Plain-text turns leave it empty.
 type Message struct {
-	Role    string `json:"role"`    // "user" or "assistant"
-	Content string `json:"content"` // message content
+	Role              string `json:"role"`          // "user" or "assistant"
+	Content           string `json:"content"`       // text content (always set)
+	StructuredContent string `json:"sc,omitempty"`  // JSON content blocks (tool turns only)
 }
 
 // MetricsCallback is called after each LLM request with performance data
@@ -615,49 +618,49 @@ func (c *Client) AskWithHistory(ctx context.Context, history []Message, prompt s
 
 // AskWithRequest sends a prompt with all settings from the request (CSP - no client state).
 // This is the primary method for the clone-based session architecture.
-// All settings come from the request parameter, making this a stateless API call.
-func (c *Client) AskWithRequest(ctx context.Context, req AskRequest) (string, int, error) {
-	// Build API messages from provided history plus the new prompt
+// When req.ToolDefs is non-nil, uses the Anthropic native tool_use protocol and
+// returns a STOP:-prefixed response. Otherwise returns plain text (backward-compatible).
+func (c *Client) AskWithRequest(ctx context.Context, req AskRequest) (AskResponse, error) {
+	// Build API messages from provided history
 	apiMessages := make([]anthropic.MessageParam, 0, len(req.Messages)+2)
 	var systemBlocks []anthropic.TextBlockParam
 
-	// Add system prompt from request
 	if req.SystemPrompt != "" {
-		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
-			Text: req.SystemPrompt,
-		})
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: req.SystemPrompt})
 	}
 
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case "system":
-			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
-				Text: msg.Content,
-			})
-		case "user":
-			apiMessages = append(apiMessages, anthropic.NewUserMessage(
-				anthropic.NewTextBlock(msg.Content),
-			))
-		case "assistant":
-			apiMessages = append(apiMessages, anthropic.NewAssistantMessage(
-				anthropic.NewTextBlock(msg.Content),
-			))
+			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: msg.Content})
+		case "user", "assistant":
+			param := buildMessageParam(msg)
+			apiMessages = append(apiMessages, param)
 		}
 	}
 
-	// Add the new user prompt
-	apiMessages = append(apiMessages, anthropic.NewUserMessage(
-		anthropic.NewTextBlock(req.Prompt),
-	))
+	// Add new user turn: either a text prompt or tool results.
+	if len(req.ToolResults) > 0 {
+		// Tool results ARE the new user turn — build tool_result content blocks.
+		var content []anthropic.ContentBlockParamUnion
+		for _, r := range req.ToolResults {
+			content = append(content, anthropic.NewToolResultBlock(r.ToolUseID, r.Content, false))
+		}
+		apiMessages = append(apiMessages, anthropic.MessageParam{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: content,
+		})
+	} else if req.Prompt != "" {
+		apiMessages = append(apiMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)))
+	}
 
-	// Add prefill as partial assistant message to keep model in character
-	if req.Prefill != "" {
+	// Prefill only when not in tool mode (prefill is inappropriate mid-tool-loop).
+	if req.Prefill != "" && len(req.ToolDefs) == 0 {
 		apiMessages = append(apiMessages, anthropic.NewAssistantMessage(
 			anthropic.NewTextBlock(req.Prefill),
 		))
 	}
 
-	// Use model from request, or fall back to client default
 	model := req.Model
 	if model == "" {
 		c.mu.RLock()
@@ -665,51 +668,198 @@ func (c *Client) AskWithRequest(ctx context.Context, req AskRequest) (string, in
 		c.mu.RUnlock()
 	}
 
-	// Use temperature from request
-	temp := req.Temperature
-
-	// Build request params
 	params := anthropic.MessageNewParams{
 		Model:       anthropic.Model(model),
 		MaxTokens:   4096,
 		Messages:    apiMessages,
-		Temperature: anthropic.Float(temp),
+		Temperature: anthropic.Float(req.Temperature),
 	}
-
-	// Add system prompt if present
 	if len(systemBlocks) > 0 {
 		params.System = systemBlocks
 	}
 
-	// Make the API call with timing
-	startTime := time.Now()
-	response, err := c.client.Messages.New(ctx, params)
-	latencyMs := time.Since(startTime).Milliseconds()
-
-	if err != nil {
-		return "", 0, fmt.Errorf("API error: %w", err)
-	}
-
-	// Extract response text
-	var responseText string
-	for _, block := range response.Content {
-		if block.Type == "text" {
-			responseText += block.Text
+	// Attach tool definitions when present.
+	if len(req.ToolDefs) > 0 {
+		params.Tools = buildToolParams(req.ToolDefs)
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfToolChoiceAuto: &anthropic.ToolChoiceAutoParam{},
 		}
 	}
 
-	// Prepend prefill to response (it was used as partial assistant message)
-	// Only if response doesn't already start with it (model may echo from history)
-	if req.Prefill != "" && !strings.HasPrefix(responseText, req.Prefill) {
-		responseText = req.Prefill + responseText
+	startTime := time.Now()
+	resp, err := c.client.Messages.New(ctx, params)
+	latencyMs := time.Since(startTime).Milliseconds()
+	if err != nil {
+		return AskResponse{}, fmt.Errorf("API error: %w", err)
 	}
 
-	tokens := int(response.Usage.InputTokens + response.Usage.OutputTokens)
+	tokens := int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
+	RecordMetrics(int(resp.Usage.InputTokens), int(resp.Usage.OutputTokens), latencyMs)
 
-	// Record metrics
-	inputToks := int(response.Usage.InputTokens)
-	outputToks := int(response.Usage.OutputTokens)
-	RecordMetrics(inputToks, outputToks, latencyMs)
+	// Plain-text mode (no tools): return text as before.
+	if len(req.ToolDefs) == 0 {
+		var text string
+		for _, block := range resp.Content {
+			if block.Type == "text" {
+				text += block.Text
+			}
+		}
+		if req.Prefill != "" && !strings.HasPrefix(text, req.Prefill) {
+			text = req.Prefill + text
+		}
+		return AskResponse{Response: text, Tokens: tokens}, nil
+	}
 
-	return responseText, tokens, nil
+	// Tool mode: format STOP: response and build structured JSON for history.
+	var textParts []string
+	var toolCalls []struct{ id, name, args string }
+	var structBlocks []string // JSON content blocks for history
+
+	for _, block := range resp.Content {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				textParts = append(textParts, block.Text)
+				escaped := jsonEscapeString(block.Text)
+				structBlocks = append(structBlocks, fmt.Sprintf(`{"type":"text","text":"%s"}`, escaped))
+			}
+		case "tool_use":
+			tb := block.AsResponseToolUseBlock()
+			args := extractToolArgs(tb.Input)
+			toolCalls = append(toolCalls, struct{ id, name, args string }{tb.ID, tb.Name, args})
+			inputJSON := string(tb.Input)
+			if inputJSON == "" {
+				inputJSON = "{}"
+			}
+			idEsc := jsonEscapeString(tb.ID)
+			nameEsc := jsonEscapeString(tb.Name)
+			structBlocks = append(structBlocks,
+				fmt.Sprintf(`{"type":"tool_use","id":"%s","name":"%s","input":%s}`, idEsc, nameEsc, inputJSON))
+		}
+	}
+
+	structuredJSON := ""
+	if len(structBlocks) > 0 {
+		structuredJSON = "[" + strings.Join(structBlocks, ",") + "]"
+	}
+
+	// Build formatted response.
+	var sb strings.Builder
+	if resp.StopReason == anthropic.MessageStopReasonToolUse {
+		sb.WriteString("STOP:tool_use\n")
+		for _, tc := range toolCalls {
+			// Escape newlines in args so the TOOL: line stays single-line.
+			safeArgs := strings.ReplaceAll(tc.args, "\n", `\n`)
+			sb.WriteString(fmt.Sprintf("TOOL:%s:%s:%s\n", tc.id, tc.name, safeArgs))
+		}
+	} else {
+		sb.WriteString("STOP:end_turn\n")
+	}
+	sb.WriteString(strings.Join(textParts, ""))
+
+	return AskResponse{Response: sb.String(), StructuredJSON: structuredJSON, Tokens: tokens}, nil
+}
+
+// buildMessageParam converts a Message to an anthropic.MessageParam.
+// When StructuredContent is set, the full content blocks are rebuilt for API replay.
+func buildMessageParam(msg Message) anthropic.MessageParam {
+	role := anthropic.MessageParamRoleUser
+	if msg.Role == "assistant" {
+		role = anthropic.MessageParamRoleAssistant
+	}
+
+	if msg.StructuredContent == "" {
+		// Plain text message.
+		if role == anthropic.MessageParamRoleUser {
+			return anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content))
+		}
+		return anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content))
+	}
+
+	// Structured content: unmarshal and rebuild content blocks.
+	type rawBlock struct {
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
+		ToolUseID string          `json:"tool_use_id"`
+		Content   string          `json:"content"`
+		IsError   bool            `json:"is_error"`
+	}
+	var blocks []rawBlock
+	if err := json.Unmarshal([]byte(msg.StructuredContent), &blocks); err != nil {
+		// Fallback to plain text on parse error.
+		if role == anthropic.MessageParamRoleUser {
+			return anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content))
+		}
+		return anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content))
+	}
+
+	var content []anthropic.ContentBlockParamUnion
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			content = append(content, anthropic.ContentBlockParamOfRequestTextBlock(b.Text))
+		case "tool_use":
+			var input interface{} = b.Input
+			if len(b.Input) == 0 {
+				input = map[string]interface{}{}
+			}
+			content = append(content, anthropic.ContentBlockParamOfRequestToolUseBlock(b.ID, input, b.Name))
+		case "tool_result":
+			content = append(content, anthropic.NewToolResultBlock(b.ToolUseID, b.Content, b.IsError))
+		}
+	}
+
+	return anthropic.MessageParam{Role: role, Content: content}
+}
+
+// buildToolParams converts ToolDef slice to anthropic SDK tool params.
+func buildToolParams(defs []ToolDef) []anthropic.ToolUnionParam {
+	out := make([]anthropic.ToolUnionParam, 0, len(defs))
+	for _, d := range defs {
+		schema := anthropic.ToolInputSchemaParam{
+			Properties: d.InputSchema["properties"],
+		}
+		desc := d.Description
+		out = append(out, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        d.Name,
+				Description: anthropic.String(desc),
+				InputSchema: schema,
+			},
+		})
+	}
+	return out
+}
+
+// extractToolArgs extracts the "args" string from a tool_use input JSON.
+// Falls back to the raw JSON string if "args" is not present.
+func extractToolArgs(input json.RawMessage) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return string(input)
+	}
+	if args, ok := m["args"].(string); ok {
+		return args
+	}
+	// No "args" key — join all string values as fallback.
+	var parts []string
+	for _, v := range m {
+		if s, ok := v.(string); ok {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// jsonEscapeString escapes a string for embedding in a JSON string literal.
+func jsonEscapeString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
 }

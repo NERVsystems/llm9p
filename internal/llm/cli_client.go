@@ -674,7 +674,8 @@ func (c *CLIClient) AskWithHistory(ctx context.Context, history []Message, promp
 // AskWithRequest sends a prompt with all settings from the request (CSP - no client state).
 // This is the primary method for the clone-based session architecture.
 // All settings come from the request parameter, making this a stateless API call.
-func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string, int, error) {
+// Note: CLIClient does not support native tool_use protocol; StructuredJSON is always empty.
+func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskResponse, error) {
 	// Build prompt from provided history
 	var parts []string
 	var systemParts []string
@@ -695,8 +696,10 @@ func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string,
 		}
 	}
 
-	// Add the new user prompt
-	parts = append(parts, fmt.Sprintf("Human: %s", req.Prompt))
+	// Add the new user prompt (may be empty for tool result turns — CLI doesn't support these)
+	if req.Prompt != "" {
+		parts = append(parts, fmt.Sprintf("Human: %s", req.Prompt))
+	}
 
 	fullPrompt := strings.Join(parts, "\n\n")
 	systemPrompt := strings.Join(systemParts, "\n\n")
@@ -743,13 +746,13 @@ func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string,
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", 0, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
+		return AskResponse{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
 	}
 
 	// Parse JSON response
 	responseText, err := parseJSONResponse(stdout.String())
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to parse CLI response: %w", err)
+		return AskResponse{}, fmt.Errorf("failed to parse CLI response: %w", err)
 	}
 
 	// Prepend prefill to response to keep model in character
@@ -761,5 +764,5 @@ func (c *CLIClient) AskWithRequest(ctx context.Context, req AskRequest) (string,
 	// Estimate tokens: prompt + response (chars / 4)
 	tokens := estimateTokens(fullPrompt) + estimateTokens(responseText)
 
-	return responseText, tokens, nil
+	return AskResponse{Response: responseText, Tokens: tokens}, nil
 }

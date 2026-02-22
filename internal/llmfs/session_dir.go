@@ -43,6 +43,7 @@ func (d *SessionDir) Children() []protocol.File {
 		NewSessionSystemFile(d.sm, d.id),
 		NewSessionThinkingFile(d.sm, d.id),
 		NewSessionPrefillFile(d.sm, d.id),
+		NewSessionToolsFile(d.sm, d.id),
 		NewSessionUsageFile(d.sm, d.id),
 	}
 }
@@ -73,6 +74,8 @@ func (d *SessionDir) Lookup(name string) (protocol.File, error) {
 		return NewSessionThinkingFile(d.sm, d.id), nil
 	case "prefill":
 		return NewSessionPrefillFile(d.sm, d.id), nil
+	case "tools":
+		return NewSessionToolsFile(d.sm, d.id), nil
 	case "usage":
 		return NewSessionUsageFile(d.sm, d.id), nil
 	default:
