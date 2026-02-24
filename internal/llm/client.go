@@ -769,11 +769,17 @@ func buildMessageParam(msg Message) anthropic.MessageParam {
 	}
 
 	if msg.StructuredContent == "" {
-		// Plain text message.
-		if role == anthropic.MessageParamRoleUser {
-			return anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content))
+		// Plain text message. Guard against empty text blocks — the Anthropic API
+		// rejects any content block with text:"". This can happen when an assistant
+		// end_turn after tool results has no text (Claude acknowledged silently).
+		content := msg.Content
+		if content == "" {
+			content = "..."
 		}
-		return anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content))
+		if role == anthropic.MessageParamRoleUser {
+			return anthropic.NewUserMessage(anthropic.NewTextBlock(content))
+		}
+		return anthropic.NewAssistantMessage(anthropic.NewTextBlock(content))
 	}
 
 	// Structured content: unmarshal and rebuild content blocks.
