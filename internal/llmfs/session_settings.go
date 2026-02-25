@@ -40,6 +40,22 @@ func (f *SessionModelFile) Read(p []byte, offset int64) (int, error) {
 	return copy(p, content[offset:]), nil
 }
 
+// modelAliases maps short convenience names to full Anthropic model IDs.
+var modelAliases = map[string]string{
+	"haiku":  "claude-haiku-4-5-20251001",
+	"sonnet": "claude-sonnet-4-6",
+	"opus":   "claude-opus-4-6",
+}
+
+// resolveModel expands a short alias to its full model ID, or returns the
+// input unchanged if it is already a full ID (or unknown).
+func resolveModel(name string) string {
+	if full, ok := modelAliases[strings.ToLower(name)]; ok {
+		return full
+	}
+	return name
+}
+
 // Write sets the model name.
 func (f *SessionModelFile) Write(p []byte, offset int64) (int, error) {
 	session := f.sm.Get(f.id)
@@ -47,7 +63,7 @@ func (f *SessionModelFile) Write(p []byte, offset int64) (int, error) {
 		return 0, protocol.ErrNotFound
 	}
 
-	model := strings.TrimSpace(string(p))
+	model := resolveModel(strings.TrimSpace(string(p)))
 	if model != "" {
 		session.SetModel(model)
 	}

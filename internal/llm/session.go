@@ -21,7 +21,7 @@ type SessionDefaults struct {
 // DefaultSessionDefaults returns sensible defaults for new sessions.
 func DefaultSessionDefaults() SessionDefaults {
 	return SessionDefaults{
-		Model:          "claude-sonnet-4-20250514",
+		Model:          "claude-sonnet-4-6",
 		Temperature:    0.7,
 		SystemPrompt:   "",
 		ThinkingTokens: 0,
