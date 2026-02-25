@@ -160,7 +160,14 @@ func (d *SessionsDir) Lookup(name string) (protocol.File, error) {
 		return nil, protocol.ErrNotFound
 	}
 
-	return NewSessionDir(d.sm, id), nil
+	// Wrap in sessionRefDir so that any Topen of the directory (or its
+	// children via sessionRefDir.Lookup) increments the session ref count.
+	// When the last ref is clunked the session is freed automatically.
+	return &sessionRefDir{
+		Dir: NewSessionDir(d.sm, id),
+		sm:  d.sm,
+		id:  id,
+	}, nil
 }
 
 // Read returns directory listing as packed stat entries.

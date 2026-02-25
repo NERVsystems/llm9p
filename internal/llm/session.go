@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // SessionDefaults are copied to new sessions at creation time.
@@ -48,6 +49,7 @@ type Session struct {
 
 	mu     sync.RWMutex
 	closed bool
+	refs   int32 // atomic reference count; session closed when it drops to 0
 
 	// Async generation + streaming support
 	streamCh chan string     // raw text chunks during generation; nil when idle
@@ -375,6 +377,29 @@ func (sm *SessionManager) Close(id int) error {
 
 	delete(sm.sessions, id)
 	return nil
+}
+
+// IncRef increments the reference count for the session with the given ID.
+// Called when a 9P client opens a file inside the session directory.
+func (sm *SessionManager) IncRef(id int) {
+	session := sm.Get(id)
+	if session != nil {
+		atomic.AddInt32(&session.refs, 1)
+	}
+}
+
+// DecRef decrements the reference count for the session with the given ID.
+// When the count reaches zero the session is closed and removed, freeing
+// all conversation history from memory.  Called when a 9P client clunks
+// (closes) a file inside the session directory.
+func (sm *SessionManager) DecRef(id int) {
+	session := sm.Get(id)
+	if session == nil {
+		return
+	}
+	if atomic.AddInt32(&session.refs, -1) <= 0 {
+		sm.Close(id) //nolint:errcheck
+	}
 }
 
 // Reset clears the conversation history for the given session.

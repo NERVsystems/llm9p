@@ -72,6 +72,13 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.mu.Unlock()
 
 	defer func() {
+		// Close all fids that were not explicitly clunked before disconnect.
+		// This triggers sessionRefFile/sessionRefDir.Close() which decrements
+		// session reference counts, allowing sessions to be freed when the
+		// last client using them disconnects.
+		for _, file := range state.fids {
+			file.Close() //nolint:errcheck
+		}
 		s.mu.Lock()
 		delete(s.clients, conn)
 		s.mu.Unlock()
