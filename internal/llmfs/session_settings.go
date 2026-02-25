@@ -43,8 +43,8 @@ func (f *SessionModelFile) Read(p []byte, offset int64) (int, error) {
 // modelAliases maps short convenience names to full Anthropic model IDs.
 var modelAliases = map[string]string{
 	"haiku":  "claude-haiku-4-5-20251001",
-	"sonnet": "claude-sonnet-4-6",
-	"opus":   "claude-opus-4-6",
+	"sonnet": "claude-sonnet-4-5-20250929",
+	"opus":   "claude-opus-4-5-20251101",
 }
 
 // resolveModel expands a short alias to its full model ID, or returns the
