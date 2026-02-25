@@ -207,15 +207,24 @@ func (s *Server) handleWalk(state *clientState, payload []byte, buf []byte) ([]b
 	for _, name := range msg.Names {
 		dir, ok := current.(Dir)
 		if !ok {
+			if s.debug {
+				log.Printf("  walk: %q is not a directory", name)
+			}
 			return s.errorResponse(buf, ErrNotDir.Error())
 		}
 
 		next, err := dir.Lookup(name)
 		if err != nil {
+			if s.debug {
+				log.Printf("  walk: lookup %q failed: %v (walked %d/%d)", name, err, len(qids), len(msg.Names))
+			}
 			// Return partial walk
 			break
 		}
 
+		if s.debug {
+			log.Printf("  walk: %q -> %T", name, next)
+		}
 		qids = append(qids, next.Stat().Qid)
 		current = next
 	}
@@ -223,6 +232,8 @@ func (s *Server) handleWalk(state *clientState, payload []byte, buf []byte) ([]b
 	// Only update fid if we walked at least one element (or no elements requested)
 	if len(qids) == len(msg.Names) {
 		state.fids[msg.Newfid] = current
+	} else if s.debug {
+		log.Printf("  walk: partial walk %d/%d names succeeded; newfid %d NOT registered", len(qids), len(msg.Names), msg.Newfid)
 	}
 
 	resp := &RwalkMsg{Qids: qids}

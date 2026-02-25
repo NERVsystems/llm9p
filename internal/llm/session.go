@@ -48,6 +48,11 @@ type Session struct {
 
 	mu     sync.RWMutex
 	closed bool
+
+	// Async generation + streaming support
+	streamCh chan string     // raw text chunks during generation; nil when idle
+	doneCh   chan struct{}   // closed when generation completes; nil when idle
+	streamMu sync.Mutex     // guards streamCh and doneCh
 }
 
 // NewSession creates a new session with the given ID and defaults.
@@ -246,6 +251,68 @@ func (s *Session) IsClosed() bool {
 	return s.closed
 }
 
+// BeginGeneration allocates the stream channel and completion signal.
+// Must be called before starting an async LLM generation.
+func (s *Session) BeginGeneration() {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	s.streamCh = make(chan string, 256)
+	s.doneCh = make(chan struct{})
+}
+
+// EndGeneration closes the stream channel and completion signal.
+// Called (via defer) when the async generation goroutine finishes.
+//
+// streamCh is closed but NOT set to nil: any buffered chunks remain readable
+// from the closed channel even if the reader hasn't opened the file yet.
+// BeginGeneration() will overwrite streamCh with a fresh channel next time.
+func (s *Session) EndGeneration() {
+	s.streamMu.Lock()
+	ch := s.streamCh
+	done := s.doneCh
+	// Do NOT nil streamCh — leave closed channel readable for late-opening readers.
+	s.doneCh = nil
+	s.streamMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	if done != nil {
+		close(done)
+	}
+}
+
+// SendChunk sends a text chunk to the stream channel (non-blocking; drops if buffer full).
+func (s *Session) SendChunk(text string) {
+	s.streamMu.Lock()
+	ch := s.streamCh
+	s.streamMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- text:
+	default: // drop if buffer full
+	}
+}
+
+// GetStreamCh returns the current stream channel, or nil if no generation is active.
+func (s *Session) GetStreamCh() chan string {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	return s.streamCh
+}
+
+// WaitDone blocks until the current generation completes, or returns immediately
+// if no generation is in progress.
+func (s *Session) WaitDone() {
+	s.streamMu.Lock()
+	done := s.doneCh
+	s.streamMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 // SessionManager manages sessions and provides API access.
 // The APIClient is stateless - all conversation state is in sessions.
 type SessionManager struct {
@@ -343,7 +410,8 @@ func (sm *SessionManager) Ask(ctx context.Context, id int, prompt string) (strin
 	prefill := session.prefill
 	session.mu.RUnlock()
 
-	// Build request with session's settings
+	// Build request with session's settings.
+	// Enable streaming when a generation is already in progress (BeginGeneration was called).
 	req := AskRequest{
 		Messages:       history,
 		Prompt:         prompt,
@@ -354,12 +422,27 @@ func (sm *SessionManager) Ask(ctx context.Context, id int, prompt string) (strin
 		Prefill:        prefill,
 		ToolDefs:       session.Tools(),
 	}
+	if session.GetStreamCh() != nil {
+		req.StreamFunc = session.SendChunk
+	}
 
 	// Make API call (stateless)
 	ar, err := sm.apiClient.AskWithRequest(ctx, req)
 	if err != nil {
-		session.SetLastResponse("Error: " + err.Error())
-		return "", err
+		if isContentFilterError(err) {
+			// Content filtering: reset history and retry once with a clean slate.
+			session.Reset()
+			req.Messages = nil
+			ar2, err2 := sm.apiClient.AskWithRequest(ctx, req)
+			if err2 != nil {
+				session.SetLastResponse("Error: " + err2.Error())
+				return "", err2
+			}
+			ar = ar2
+		} else {
+			session.SetLastResponse("Error: " + err.Error())
+			return "", err
+		}
 	}
 
 	// Update session state — store structured content for tool turns
@@ -403,9 +486,21 @@ func (sm *SessionManager) AskWithToolResults(ctx context.Context, id int, result
 		// Prompt is intentionally empty — tool results ARE the new user turn.
 		// Prefill is intentionally empty — prefill is inappropriate mid-tool-loop.
 	}
+	if session.GetStreamCh() != nil {
+		req.StreamFunc = session.SendChunk
+	}
 
 	ar, err := sm.apiClient.AskWithRequest(ctx, req)
 	if err != nil {
+		if isContentFilterError(err) {
+			// Content filtering on a tool-result turn: the offending content is
+			// in the tool results. Reset history and return a synthetic end_turn
+			// so the agent can surface a message rather than hard-crashing.
+			session.Reset()
+			synthetic := "STOP:end_turn\nContent filtering policy blocked a tool result. The session history has been reset. Please try a different approach or rephrase your request."
+			session.SetLastResponse(synthetic)
+			return synthetic, nil
+		}
 		session.SetLastResponse("Error: " + err.Error())
 		return "", err
 	}
@@ -550,6 +645,14 @@ type AskRequest struct {
 	Prefill        string
 	ToolDefs       []ToolDef    // non-nil enables native tool_use protocol
 	ToolResults    []ToolResult // non-nil: submit tool results as a new user turn
+	StreamFunc     func(string) // optional; called for each text_delta chunk during streaming
+}
+
+// isContentFilterError returns true when the API rejected the request due to
+// Anthropic's content filtering policy. The session history should be reset
+// before retrying in this case.
+func isContentFilterError(err error) bool {
+	return strings.Contains(err.Error(), "content filtering policy")
 }
 
 // Errors

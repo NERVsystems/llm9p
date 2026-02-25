@@ -10,7 +10,7 @@ import (
 )
 
 // SessionDir represents a single session directory: /n/llm/N/
-// Contains: ask, compact, context, ctl, model, temperature, system, thinking, prefill, usage
+// Contains: ask, compact, context, ctl, model, temperature, system, thinking, prefill, tools, usage, stream
 type SessionDir struct {
 	*protocol.BaseFile
 	sm *llm.SessionManager
@@ -43,6 +43,7 @@ func (d *SessionDir) Children() []protocol.File {
 		NewSessionSystemFile(d.sm, d.id),
 		NewSessionThinkingFile(d.sm, d.id),
 		NewSessionPrefillFile(d.sm, d.id),
+		NewSessionStreamFile(d.sm, d.id),
 		NewSessionToolsFile(d.sm, d.id),
 		NewSessionUsageFile(d.sm, d.id),
 	}
@@ -74,6 +75,8 @@ func (d *SessionDir) Lookup(name string) (protocol.File, error) {
 		return NewSessionThinkingFile(d.sm, d.id), nil
 	case "prefill":
 		return NewSessionPrefillFile(d.sm, d.id), nil
+	case "stream":
+		return NewSessionStreamFile(d.sm, d.id), nil
 	case "tools":
 		return NewSessionToolsFile(d.sm, d.id), nil
 	case "usage":

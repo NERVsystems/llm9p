@@ -29,11 +29,15 @@ func NewSessionAskFile(sm *llm.SessionManager, id int) *SessionAskFile {
 }
 
 // Read returns the last response from this session.
+// Blocks until any in-progress generation completes before returning content.
 func (f *SessionAskFile) Read(p []byte, offset int64) (int, error) {
 	session := f.sm.Get(f.id)
 	if session == nil {
 		return 0, protocol.ErrNotFound
 	}
+
+	// Wait for the background generation goroutine (if any) to finish.
+	session.WaitDone()
 
 	content := session.LastResponse()
 	if content != "" && !strings.HasSuffix(content, "\n") {
@@ -49,6 +53,9 @@ func (f *SessionAskFile) Read(p []byte, offset int64) (int, error) {
 }
 
 // Write sends a prompt to the LLM using this session's settings.
+// Returns immediately after starting the generation in a background goroutine.
+// The response is available via Read (pread) once generation completes.
+//
 // If the write begins with "TOOL_RESULTS\n", it is parsed as tool execution
 // results and submitted via AskWithToolResults instead of a plain Ask.
 //
@@ -69,37 +76,46 @@ func (f *SessionAskFile) Write(p []byte, offset int64) (int, error) {
 		return len(p), nil // Empty write is a no-op
 	}
 
-	ctx := context.Background()
+	session := f.sm.Get(f.id)
+	if session == nil {
+		return 0, protocol.ErrNotFound
+	}
+	if session.IsClosed() {
+		return 0, protocol.ErrPermission
+	}
 
-	// Detect TOOL_RESULTS prefix → submit tool results, not a plain prompt
-	if strings.HasPrefix(prompt, "TOOL_RESULTS\n") {
-		results, err := parseToolResults(prompt)
-		if err != nil {
-			log.Printf("llm9p: SessionAskFile.Write TOOL_RESULTS parse error: %v", err)
-			// Store error in session so client can read it back
-			session := f.sm.Get(f.id)
-			if session != nil {
+	// Allocate streaming channel and done signal before launching goroutine.
+	// This ensures the stream file can observe a non-nil channel immediately
+	// after the write returns (no race between Write and stream Read).
+	session.BeginGeneration()
+
+	// Launch generation goroutine — Write returns to the caller immediately.
+	sm := f.sm
+	id := f.id
+	go func() {
+		defer session.EndGeneration()
+		ctx := context.Background()
+
+		if strings.HasPrefix(prompt, "TOOL_RESULTS\n") {
+			results, err := parseToolResults(prompt)
+			if err != nil {
+				log.Printf("llm9p: async gen TOOL_RESULTS parse error: %v", err)
 				session.SetLastResponse("Error: " + err.Error())
+				return
 			}
-			return len(p), nil
+			log.Printf("llm9p: async gen submitting %d tool results", len(results))
+			if _, err = sm.AskWithToolResults(ctx, id, results); err != nil {
+				log.Printf("llm9p: async gen tool results error: %v", err)
+			}
+			return
 		}
-		log.Printf("llm9p: SessionAskFile.Write submitting %d tool results", len(results))
-		_, err = f.sm.AskWithToolResults(ctx, f.id, results)
-		if err != nil {
-			log.Printf("llm9p: SessionAskFile.Write tool results error: %v", err)
+
+		log.Printf("llm9p: async gen prompt: %s", prompt[:min(len(prompt), 50)])
+		if _, err := sm.Ask(ctx, id, prompt); err != nil {
+			log.Printf("llm9p: async gen error: %v", err)
 		}
-		return len(p), nil
-	}
+	}()
 
-	// Regular text prompt
-	log.Printf("llm9p: SessionAskFile.Write prompt: %s", prompt[:min(len(prompt), 50)])
-	response, err := f.sm.Ask(ctx, f.id, prompt)
-	if err != nil {
-		log.Printf("llm9p: SessionAskFile.Write error: %v", err)
-		return len(p), nil
-	}
-
-	log.Printf("llm9p: SessionAskFile.Write success, response len=%d", len(response))
 	return len(p), nil
 }
 

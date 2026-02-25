@@ -686,11 +686,37 @@ func (c *Client) AskWithRequest(ctx context.Context, req AskRequest) (AskRespons
 		}
 	}
 
+	var (
+		resp      *anthropic.Message
+		latencyMs int64
+	)
 	startTime := time.Now()
-	resp, err := c.client.Messages.New(ctx, params)
-	latencyMs := time.Since(startTime).Milliseconds()
-	if err != nil {
-		return AskResponse{}, fmt.Errorf("API error: %w", err)
+
+	if req.StreamFunc != nil {
+		// Streaming path: use SSE, call StreamFunc for each text_delta chunk.
+		// Accumulate the full message for STOP:/TOOL: formatting after streaming ends.
+		stream := c.client.Messages.NewStreaming(ctx, params)
+		var acc anthropic.Message
+		for stream.Next() {
+			event := stream.Current()
+			if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
+				req.StreamFunc(event.Delta.Text)
+			}
+			_ = acc.Accumulate(event)
+		}
+		latencyMs = time.Since(startTime).Milliseconds()
+		if err := stream.Err(); err != nil {
+			return AskResponse{}, fmt.Errorf("API streaming error: %w", err)
+		}
+		resp = &acc
+	} else {
+		// Blocking path: single HTTP request, no streaming.
+		r, err := c.client.Messages.New(ctx, params)
+		latencyMs = time.Since(startTime).Milliseconds()
+		if err != nil {
+			return AskResponse{}, fmt.Errorf("API error: %w", err)
+		}
+		resp = r
 	}
 
 	tokens := int(resp.Usage.InputTokens + resp.Usage.OutputTokens)
