@@ -12,32 +12,35 @@ type mockAPIClient struct {
 	askError    error
 }
 
-func (m *mockAPIClient) Model() string                            { return "claude-sonnet-4-20250514" }
-func (m *mockAPIClient) SetModel(string)                         {}
-func (m *mockAPIClient) Temperature() float64                    { return 0.7 }
-func (m *mockAPIClient) SetTemperature(float64) error            { return nil }
-func (m *mockAPIClient) SystemPrompt() string                    { return "" }
-func (m *mockAPIClient) SetSystemPrompt(string)                  {}
-func (m *mockAPIClient) ThinkingTokens() int                     { return 0 }
-func (m *mockAPIClient) SetThinkingTokens(int)                   {}
-func (m *mockAPIClient) Prefill() string                         { return "" }
-func (m *mockAPIClient) SetPrefill(string)                       {}
-func (m *mockAPIClient) LastTokens() int                         { return m.askTokens }
-func (m *mockAPIClient) TotalTokens() int                        { return 0 }
-func (m *mockAPIClient) ContextLimit() int                       { return 200000 }
-func (m *mockAPIClient) Compact(context.Context) error           { return nil }
-func (m *mockAPIClient) Messages() []Message                     { return nil }
-func (m *mockAPIClient) MessagesJSON() ([]byte, error)           { return []byte("[]"), nil }
-func (m *mockAPIClient) AddSystemMessage(string)                 {}
-func (m *mockAPIClient) Reset()                                  {}
+func (m *mockAPIClient) Model() string                 { return "claude-sonnet-4-20250514" }
+func (m *mockAPIClient) SetModel(string)               {}
+func (m *mockAPIClient) Temperature() float64          { return 0.7 }
+func (m *mockAPIClient) SetTemperature(float64) error  { return nil }
+func (m *mockAPIClient) SystemPrompt() string          { return "" }
+func (m *mockAPIClient) SetSystemPrompt(string)        {}
+func (m *mockAPIClient) ThinkingTokens() int           { return 0 }
+func (m *mockAPIClient) SetThinkingTokens(int)         {}
+func (m *mockAPIClient) Prefill() string               { return "" }
+func (m *mockAPIClient) SetPrefill(string)             {}
+func (m *mockAPIClient) LastTokens() int               { return m.askTokens }
+func (m *mockAPIClient) TotalTokens() int              { return 0 }
+func (m *mockAPIClient) ContextLimit() int             { return 200000 }
+func (m *mockAPIClient) Compact(context.Context) error { return nil }
+func (m *mockAPIClient) Messages() []Message           { return nil }
+func (m *mockAPIClient) MessagesJSON() ([]byte, error) { return []byte("[]"), nil }
+func (m *mockAPIClient) AddSystemMessage(string)       {}
+func (m *mockAPIClient) Reset()                        {}
 func (m *mockAPIClient) Ask(_ context.Context, _ string) (string, error) {
 	return m.askResponse, m.askError
 }
 func (m *mockAPIClient) AskWithHistory(_ context.Context, _ []Message, _ string) (string, int, error) {
 	return m.askResponse, m.askTokens, m.askError
 }
-func (m *mockAPIClient) AskWithRequest(_ context.Context, _ AskRequest) (string, int, error) {
-	return m.askResponse, m.askTokens, m.askError
+func (m *mockAPIClient) AskWithRequest(_ context.Context, req AskRequest) (AskResponse, error) {
+	if m.askError != nil {
+		return AskResponse{}, m.askError
+	}
+	return AskResponse{Response: m.askResponse, Tokens: m.askTokens}, nil
 }
 func (m *mockAPIClient) StartStream(context.Context, string) error { return nil }
 func (m *mockAPIClient) ReadStreamChunk() (string, bool)           { return "", false }

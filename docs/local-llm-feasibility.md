@@ -2,7 +2,50 @@
 
 ## Summary
 
-Adding local LLM support to llm9p is **highly feasible** and architecturally straightforward. The existing `Backend` interface already provides the right abstraction, and the ecosystem has converged on OpenAI-compatible APIs as the standard interface for local model servers. A new `OpenAIClient` backend (~400-500 lines of Go) would enable llm9p to work with Ollama, llama.cpp, vLLM, LocalAI, LM Studio, and any other server exposing `/v1/chat/completions`.
+Adding local LLM support to llm9p is **highly feasible** and architecturally straightforward. The primary target is **GPT-OSS** (OpenAI's open-weight models), but the implementation covers any model served via the OpenAI-compatible `/v1/chat/completions` endpoint. The existing `Backend` interface already provides the right abstraction. A new `OpenAIClient` backend (~400-500 lines of Go) would enable llm9p to work with GPT-OSS (via Ollama, vLLM, or llama.cpp), as well as Llama, Mistral, Qwen, and any other model served by these platforms.
+
+## Primary Target: GPT-OSS
+
+GPT-OSS is OpenAI's first open-weight model release since GPT-2, released August 2025 under the Apache 2.0 license. It consists of two Mixture-of-Experts (MoE) models:
+
+| Model | Total Params | Active/Token | VRAM | Context | Target Hardware |
+|---|---|---|---|---|---|
+| **gpt-oss-20b** | 21B | 3.6B | ~14-16 GB | 128K | Consumer GPUs (RTX 4090), Apple Silicon |
+| **gpt-oss-120b** | 117B | 5.1B | ~80 GB | 128K | H100/H200/B200 |
+
+### Why GPT-OSS is a good fit for llm9p
+
+- **Strong tool calling**: Outperforms o4-mini on TauBench -- important for llm9p's tool_use protocol
+- **128K context**: Matches Claude's context window, so the existing compaction logic works well
+- **Runs on consumer hardware**: gpt-oss-20b needs only ~14 GB (Apple M-series or a single RTX 4090)
+- **Standard API**: All serving backends expose it via OpenAI `/v1/chat/completions` -- no special handling needed
+- **Harmony format abstracted away**: GPT-OSS uses a new token format called "Harmony" internally, but Ollama/vLLM/llama.cpp handle the conversion. The client just uses the standard chat completions API
+
+### Serving GPT-OSS locally
+
+```bash
+# Ollama (simplest -- auto-downloads the model)
+ollama pull gpt-oss:20b
+# API at http://localhost:11434/v1
+
+# vLLM (production, GPU servers)
+vllm serve openai/gpt-oss-20b --tool-call-parser openai
+# API at http://localhost:8000/v1
+
+# llama.cpp (GGUF quantization, partial GPU offload)
+llama-server -hf ggml-org/gpt-oss-20b-GGUF --jinja
+# API at http://localhost:8080/v1
+```
+
+### Using GPT-OSS with llm9p (planned)
+
+```bash
+# GPT-OSS via Ollama
+./llm9p -backend openai -openai-url http://localhost:11434/v1 -model gpt-oss:20b
+
+# GPT-OSS via vLLM
+./llm9p -backend openai -openai-url http://localhost:8000/v1 -model openai/gpt-oss-20b
+```
 
 ## Current Architecture
 
@@ -205,14 +248,14 @@ Total: **~700 lines of new code**, mostly mechanical since it follows the existi
 
 | Model | Size | Context | Tool Calling | Notes |
 |---|---|---|---|---|
+| **GPT-OSS 20B** | ~14-16 GB | 128K | Yes (strong) | Primary target; MoE, only 3.6B active |
+| **GPT-OSS 120B** | ~80 GB | 128K | Yes (strong) | For GPU servers; beats o4-mini |
 | Llama 3.1 8B Instruct | 4-8 GB | 128K | Yes | Best balance of quality and speed |
 | Qwen 2.5 7B Instruct | 4-8 GB | 32K | Yes | Strong multilingual, good at tools |
 | Mistral 7B Instruct | 4-8 GB | 32K | Yes | Fast, good instruction following |
-| Phi-3 Mini 3.8B | 2-4 GB | 128K | Limited | Smallest usable model |
-| DeepSeek-R1 7B | 4-8 GB | 64K | No | Strong reasoning, no tool calling |
 
 ## Conclusion
 
-Adding local LLM support is a well-scoped, low-risk enhancement. The `Backend` interface is already designed for exactly this kind of extension. The OpenAI-compatible API is the clear integration point since the entire ecosystem has standardized on it. The `sashabaranov/go-openai` Go library provides everything needed. Implementation would take roughly a day of development, following the established patterns in `cli_client.go`.
+Adding local LLM support is a well-scoped, low-risk enhancement. The `Backend` interface is already designed for exactly this kind of extension. GPT-OSS is the primary target -- it offers strong tool calling, 128K context, and runs on consumer hardware. The OpenAI-compatible API is the clear integration point since the entire ecosystem (including GPT-OSS serving via Ollama/vLLM/llama.cpp) has standardized on it. The `sashabaranov/go-openai` Go library provides everything needed.
 
-The result would make llm9p usable in fully offline/air-gapped environments, eliminate API costs for development and experimentation, and open the door to any model ecosystem (not just Claude).
+The result would make llm9p usable with GPT-OSS and other open-weight models in fully offline/air-gapped environments, eliminate API costs for development and experimentation, and open the door to any model ecosystem.

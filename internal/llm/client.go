@@ -17,9 +17,9 @@ import (
 // StructuredContent, when non-empty, holds a JSON array of content blocks
 // for proper API replay of tool-use turns. Plain-text turns leave it empty.
 type Message struct {
-	Role              string `json:"role"`          // "user" or "assistant"
-	Content           string `json:"content"`       // text content (always set)
-	StructuredContent string `json:"sc,omitempty"`  // JSON content blocks (tool turns only)
+	Role              string `json:"role"`         // "user" or "assistant"
+	Content           string `json:"content"`      // text content (always set)
+	StructuredContent string `json:"sc,omitempty"` // JSON content blocks (tool turns only)
 }
 
 // MetricsCallback is called after each LLM request with performance data

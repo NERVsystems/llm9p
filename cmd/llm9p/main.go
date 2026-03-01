@@ -37,7 +37,9 @@ import (
 func main() {
 	addr := flag.String("addr", ":5640", "Address to listen on")
 	debug := flag.Bool("debug", false, "Enable debug logging")
-	backend := flag.String("backend", "api", "Backend to use: 'api' (Anthropic API) or 'cli' (Claude Code CLI for Max subscription)")
+	backend := flag.String("backend", "api", "Backend to use: 'api' (Anthropic API), 'cli' (Claude Code CLI), or 'openai' (OpenAI-compatible local server)")
+	openaiURL := flag.String("openai-url", "http://localhost:11434/v1", "Base URL for OpenAI-compatible server (e.g. http://localhost:11434/v1 for Ollama)")
+	model := flag.String("model", "", "Model name for OpenAI-compatible backend (e.g. gpt-oss:20b)")
 	flag.Parse()
 
 	var client llm.Backend
@@ -64,8 +66,18 @@ func main() {
 		client = llm.NewClient(apiKey)
 		log.Println("Using Anthropic API backend")
 
+	case "openai":
+		if *model == "" {
+			fmt.Fprintln(os.Stderr, "Error: -model flag is required for OpenAI-compatible backend")
+			fmt.Fprintln(os.Stderr, "Example: -backend openai -model gpt-oss:20b")
+			os.Exit(1)
+		}
+		apiKey := os.Getenv("OPENAI_API_KEY")
+		client = llm.NewOpenAIClient(*openaiURL, apiKey, *model)
+		log.Printf("Using OpenAI-compatible backend at %s (model: %s)", *openaiURL, *model)
+
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown backend '%s' (use 'api' or 'cli')\n", *backend)
+		fmt.Fprintf(os.Stderr, "Error: unknown backend '%s' (use 'api', 'cli', or 'openai')\n", *backend)
 		os.Exit(1)
 	}
 

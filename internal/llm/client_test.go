@@ -13,7 +13,7 @@ func TestContextLimitForModel(t *testing.T) {
 		{"claude-3-sonnet-20240229", 200000},
 		{"claude-3-haiku-20240307", 200000},
 		{"claude-sonnet-4-20250514", 200000},
-		{"CLAUDE-3-OPUS", 200000},   // case insensitive
+		{"CLAUDE-3-OPUS", 200000},     // case insensitive
 		{"some-sonnet-model", 200000}, // substring match
 		{"unknown-model", 200000},     // default
 	}
