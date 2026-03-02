@@ -327,11 +327,13 @@ type SessionManager struct {
 
 // NewSessionManager creates a new session manager.
 func NewSessionManager(apiClient Backend) *SessionManager {
+	defaults := DefaultSessionDefaults()
+	defaults.Model = apiClient.Model()
 	return &SessionManager{
 		sessions:  make(map[int]*Session),
 		nextID:    0,
 		apiClient: apiClient,
-		defaults:  DefaultSessionDefaults(),
+		defaults:  defaults,
 	}
 }
 
@@ -343,6 +345,9 @@ func (sm *SessionManager) SetDefaults(defaults SessionDefaults) {
 }
 
 // Create creates a new session and returns its ID.
+// Sessions start with refs=1 so they persist across independent
+// 9P connections (e.g. CLI tool invocations). Use sm.Close or
+// write "close" to the session's ctl file to explicitly remove it.
 func (sm *SessionManager) Create() int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -350,7 +355,9 @@ func (sm *SessionManager) Create() int {
 	id := sm.nextID
 	sm.nextID++
 
-	sm.sessions[id] = NewSession(id, sm.defaults)
+	s := NewSession(id, sm.defaults)
+	s.refs = 1 // session holds a reference to itself until explicitly closed
+	sm.sessions[id] = s
 	return id
 }
 
