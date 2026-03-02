@@ -52,9 +52,9 @@ type Session struct {
 	refs   int32 // atomic reference count; session closed when it drops to 0
 
 	// Async generation + streaming support
-	streamCh chan string     // raw text chunks during generation; nil when idle
-	doneCh   chan struct{}   // closed when generation completes; nil when idle
-	streamMu sync.Mutex     // guards streamCh and doneCh
+	streamCh chan string   // raw text chunks during generation; nil when idle
+	doneCh   chan struct{} // closed when generation completes; nil when idle
+	streamMu sync.Mutex    // guards streamCh and doneCh
 }
 
 // NewSession creates a new session with the given ID and defaults.
@@ -662,7 +662,7 @@ func (sm *SessionManager) Compact(ctx context.Context, id int) error {
 // AskRequest contains all parameters for an API call.
 type AskRequest struct {
 	Messages       []Message
-	Prompt         string  // empty when ToolResults is set (tool_results IS the new user turn)
+	Prompt         string // empty when ToolResults is set (tool_results IS the new user turn)
 	Model          string
 	Temperature    float64
 	SystemPrompt   string

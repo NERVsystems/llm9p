@@ -33,9 +33,9 @@ func NewMockBackend() *MockBackend {
 	}
 }
 
-func (m *MockBackend) Model() string                  { return m.model }
-func (m *MockBackend) SetModel(model string)          { m.model = model }
-func (m *MockBackend) Temperature() float64           { return m.temperature }
+func (m *MockBackend) Model() string         { return m.model }
+func (m *MockBackend) SetModel(model string) { m.model = model }
+func (m *MockBackend) Temperature() float64  { return m.temperature }
 func (m *MockBackend) SetTemperature(temp float64) error {
 	if temp < 0 || temp > 2 {
 		return fmt.Errorf("invalid temperature")
@@ -103,12 +103,12 @@ func (m *MockBackend) AskWithHistory(ctx context.Context, history []llm.Message,
 	return m.askResponse, tokens, nil
 }
 
-func (m *MockBackend) AskWithRequest(ctx context.Context, req llm.AskRequest) (string, int, error) {
+func (m *MockBackend) AskWithRequest(ctx context.Context, req llm.AskRequest) (llm.AskResponse, error) {
 	if m.askError != nil {
-		return "", 0, m.askError
+		return llm.AskResponse{}, m.askError
 	}
 	tokens := len(req.Prompt) + len(m.askResponse)
-	return m.askResponse, tokens, nil
+	return llm.AskResponse{Response: m.askResponse, Tokens: tokens}, nil
 }
 
 func (m *MockBackend) StartStream(ctx context.Context, prompt string) error {

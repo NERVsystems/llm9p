@@ -94,6 +94,7 @@ type Backend interface {
 	WaitStream()
 }
 
-// Verify that both clients implement Backend
+// Verify that all clients implement Backend
 var _ Backend = (*Client)(nil)
 var _ Backend = (*CLIClient)(nil)
+var _ Backend = (*OpenAIClient)(nil)

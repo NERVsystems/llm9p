@@ -91,8 +91,8 @@ func (f *BaseFile) Stat() Stat {
 	}
 }
 
-func (f *BaseFile) Open(mode uint8) error                   { return nil }
-func (f *BaseFile) Close() error                            { return nil }
+func (f *BaseFile) Open(mode uint8) error                     { return nil }
+func (f *BaseFile) Close() error                              { return nil }
 func (f *BaseFile) Read(p []byte, offset int64) (int, error)  { return 0, io.EOF }
 func (f *BaseFile) Write(p []byte, offset int64) (int, error) { return 0, ErrPermission }
 
