@@ -7,11 +7,14 @@
 package llm
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +27,9 @@ import (
 // Ollama, vLLM, llama-server, LocalAI, LM Studio, etc.
 type OpenAIClient struct {
 	client         *openai.Client
+	httpClient     *http.Client
+	baseURL        string
+	apiKey         string
 	mu             sync.RWMutex
 	model          string
 	temperature    float64
@@ -39,6 +45,86 @@ type OpenAIClient struct {
 	streamDone     chan struct{}
 }
 
+// ollamaChatRequest is a superset of the OpenAI ChatCompletionRequest that
+// includes Ollama-specific options (think, think_level) for reasoning control.
+// Non-Ollama servers ignore the Options field.
+type ollamaChatRequest struct {
+	Model         string                         `json:"model"`
+	Messages      []openai.ChatCompletionMessage `json:"messages"`
+	MaxTokens     int                            `json:"max_tokens,omitempty"`
+	Temperature   float32                        `json:"temperature,omitempty"`
+	Stream        bool                           `json:"stream,omitempty"`
+	StreamOptions *openai.StreamOptions          `json:"stream_options,omitempty"`
+	Tools         []openai.Tool                  `json:"tools,omitempty"`
+	ToolChoice    interface{}                    `json:"tool_choice,omitempty"`
+	Options       map[string]interface{}         `json:"options,omitempty"`
+}
+
+// sseChunk is used to parse Server-Sent Event chunks from the streaming path.
+type sseChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content   string            `json:"content"`
+			ToolCalls []openai.ToolCall `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// thinkOptions maps a session thinking-token budget to Ollama think options,
+// providing a unified thinking interface across backends:
+//
+//	0           → think: false  (off)
+//	1–10000     → think: true,  think_level: "low"
+//	10001–20000 → think: true,  think_level: "medium"
+//	20001+ / -1 → think: true,  think_level: "high"
+func thinkOptions(tokens int) map[string]interface{} {
+	if tokens == 0 {
+		return map[string]interface{}{"think": false}
+	}
+	level := "high"
+	switch {
+	case tokens > 0 && tokens <= 10000:
+		level = "low"
+	case tokens <= 20000:
+		level = "medium"
+	}
+	return map[string]interface{}{"think": true, "think_level": level}
+}
+
+// postOllama POSTs an ollamaChatRequest to the /v1/chat/completions endpoint
+// and returns the raw HTTP response. The caller must close the response body.
+func (c *OpenAIClient) postOllama(ctx context.Context, req ollamaChatRequest) (*http.Response, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	url := strings.TrimRight(c.baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" && c.apiKey != "not-needed" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
+	}
+	return resp, nil
+}
+
 // NewOpenAIClient creates a new OpenAI-compatible LLM client.
 // baseURL should include /v1 (e.g. "http://localhost:11434/v1" for Ollama).
 // apiKey can be empty or a dummy value for local servers that don't require auth.
@@ -51,6 +137,9 @@ func NewOpenAIClient(baseURL, apiKey, model string) *OpenAIClient {
 	config.BaseURL = baseURL
 	return &OpenAIClient{
 		client:       openai.NewClientWithConfig(config),
+		httpClient:   &http.Client{Timeout: 10 * time.Minute},
+		baseURL:      baseURL,
+		apiKey:       apiKey,
 		model:        model,
 		temperature:  0.7,
 		messages:     make([]Message, 0),
@@ -91,7 +180,7 @@ func (c *OpenAIClient) SetTemperature(temp float64) error {
 }
 
 // ThinkingTokens returns the thinking token budget.
-// Not used by OpenAI-compatible backends; stored for interface compliance.
+// Mapped to Ollama think options: 0=off, 1-10000=low, 10001-20000=medium, 20001+/-1=high.
 func (c *OpenAIClient) ThinkingTokens() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -99,7 +188,7 @@ func (c *OpenAIClient) ThinkingTokens() int {
 }
 
 // SetThinkingTokens sets the thinking token budget.
-// Not used by OpenAI-compatible backends.
+// Mapped to Ollama think options: 0=off, 1-10000=low, 10001-20000=medium, 20001+/-1=high.
 func (c *OpenAIClient) SetThinkingTokens(tokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -486,17 +575,21 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 
 	temp := req.Temperature
 
-	chatReq := openai.ChatCompletionRequest{
+	// Build the unified request (ollamaChatRequest is a superset of the OpenAI
+	// ChatCompletionRequest and includes the Options field for Ollama-specific
+	// think/think_level reasoning control).
+	ollamaReq := ollamaChatRequest{
 		Model:       model,
 		MaxTokens:   4096,
 		Temperature: float32(temp),
 		Messages:    apiMsgs,
+		Options:     thinkOptions(req.ThinkingTokens),
 	}
 
 	// Attach tool definitions when present
 	if len(req.ToolDefs) > 0 {
-		chatReq.Tools = buildOpenAITools(req.ToolDefs)
-		chatReq.ToolChoice = "auto"
+		ollamaReq.Tools = buildOpenAITools(req.ToolDefs)
+		ollamaReq.ToolChoice = "auto"
 	}
 
 	var (
@@ -512,27 +605,40 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 	startTime := time.Now()
 
 	if req.StreamFunc != nil {
-		// Streaming path
-		chatReq.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
-		stream, err := c.client.CreateChatCompletionStream(ctx, chatReq)
+		// Streaming path: POST with stream:true, parse SSE manually so we can
+		// include the Ollama-specific Options field (not possible via go-openai).
+		ollamaReq.Stream = true
+		ollamaReq.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
+
+		httpResp, err := c.postOllama(ctx, ollamaReq)
 		if err != nil {
 			return AskResponse{}, fmt.Errorf("OpenAI streaming error: %w", err)
 		}
-		defer stream.Close()
+		defer httpResp.Body.Close()
 
 		var textParts []string
 		toolCallMap := make(map[int]*openai.ToolCall)
 
-		for {
-			chunk, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(make([]byte, 1<<20), 1<<20) // 1 MB per line for large chunks
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := line[6:]
+			if data == "[DONE]" {
 				break
 			}
-			if err != nil {
-				return AskResponse{}, fmt.Errorf("OpenAI streaming error: %w", err)
+
+			var chunk sseChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
 			}
 
-			// Capture usage from the final chunk
 			if chunk.Usage != nil {
 				promptTokens = chunk.Usage.PromptTokens
 				completionToks = chunk.Usage.CompletionTokens
@@ -544,7 +650,9 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 			}
 
 			choice := chunk.Choices[0]
-			finishReason = choice.FinishReason
+			if choice.FinishReason != "" {
+				finishReason = openai.FinishReason(choice.FinishReason)
+			}
 
 			// Text delta
 			if choice.Delta.Content != "" {
@@ -560,14 +668,8 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 				}
 				existing, ok := toolCallMap[idx]
 				if !ok {
-					toolCallMap[idx] = &openai.ToolCall{
-						ID:   tc.ID,
-						Type: tc.Type,
-						Function: openai.FunctionCall{
-							Name:      tc.Function.Name,
-							Arguments: tc.Function.Arguments,
-						},
-					}
+					cp := tc
+					toolCallMap[idx] = &cp
 				} else {
 					if tc.ID != "" {
 						existing.ID = tc.ID
@@ -578,6 +680,9 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 					existing.Function.Arguments += tc.Function.Arguments
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+			return AskResponse{}, fmt.Errorf("SSE read error: %w", err)
 		}
 
 		latencyMs = time.Since(startTime).Milliseconds()
@@ -590,12 +695,18 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 			}
 		}
 	} else {
-		// Blocking path
-		resp, err := c.client.CreateChatCompletion(ctx, chatReq)
-		latencyMs = time.Since(startTime).Milliseconds()
+		// Blocking path: POST and decode the JSON response directly.
+		httpResp, err := c.postOllama(ctx, ollamaReq)
 		if err != nil {
 			return AskResponse{}, fmt.Errorf("OpenAI API error: %w", err)
 		}
+		defer httpResp.Body.Close()
+
+		var resp openai.ChatCompletionResponse
+		if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+			return AskResponse{}, fmt.Errorf("decode response: %w", err)
+		}
+		latencyMs = time.Since(startTime).Milliseconds()
 
 		if len(resp.Choices) == 0 {
 			return AskResponse{}, fmt.Errorf("OpenAI API returned no choices")
