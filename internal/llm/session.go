@@ -464,6 +464,18 @@ func (sm *SessionManager) Ask(ctx context.Context, id int, prompt string) (strin
 				return "", err2
 			}
 			ar = ar2
+		} else if isToolUseHistoryError(err) {
+			// Orphaned tool_use blocks in history (a previous AskWithToolResults
+			// failed before recording results). Reset and retry with a clean slate
+			// so the user can continue working.
+			session.Reset()
+			req.Messages = nil
+			ar2, err2 := sm.apiClient.AskWithRequest(ctx, req)
+			if err2 != nil {
+				session.SetLastResponse("Error: " + err2.Error())
+				return "", err2
+			}
+			ar = ar2
 		} else {
 			session.SetLastResponse("Error: " + err.Error())
 			return "", err
@@ -515,6 +527,14 @@ func (sm *SessionManager) AskWithToolResults(ctx context.Context, id int, result
 		req.StreamFunc = session.SendChunk
 	}
 
+	// Record tool_results in history BEFORE the API call so the history stays
+	// valid even if the call fails. An orphaned tool_use assistant message
+	// (no following tool_result) causes every subsequent Ask to fail with
+	// "tool_use ids found without tool_result blocks".
+	toolResultsText := fmt.Sprintf("tool results: %d results submitted", len(results))
+	toolResultsJSON := buildToolResultsJSON(results)
+	session.AddStructuredMessage("user", toolResultsText, toolResultsJSON)
+
 	ar, err := sm.apiClient.AskWithRequest(ctx, req)
 	if err != nil {
 		if isContentFilterError(err) {
@@ -526,14 +546,15 @@ func (sm *SessionManager) AskWithToolResults(ctx context.Context, id int, result
 			session.SetLastResponse(synthetic)
 			return synthetic, nil
 		}
-		session.SetLastResponse("Error: " + err.Error())
+		// On any other error, add a synthetic assistant error message so the
+		// history ends with assistant (not user), keeping role alternation valid.
+		errMsg := "Error: " + err.Error()
+		session.AddStructuredMessage("assistant", errMsg, "")
+		session.SetLastResponse(errMsg)
 		return "", err
 	}
 
-	// Store tool_result user turn + assistant response in history
-	toolResultsText := fmt.Sprintf("tool results: %d results submitted", len(results))
-	toolResultsJSON := buildToolResultsJSON(results)
-	session.AddStructuredMessage("user", toolResultsText, toolResultsJSON)
+	// Add the assistant response to history.
 	textContent := extractTextContent(ar.Response)
 	session.AddStructuredMessage("assistant", textContent, ar.StructuredJSON)
 	session.AddTokens(ar.Tokens)
@@ -562,20 +583,25 @@ func extractTextContent(response string) string {
 
 // buildToolResultsJSON builds the JSON content blocks for a tool_results user turn.
 // Stored in Message.StructuredContent for proper API replay.
+// Uses json.Marshal to guarantee correct escaping of all characters.
 func buildToolResultsJSON(results []ToolResult) string {
 	if len(results) == 0 {
 		return ""
 	}
-	var parts []string
-	for _, r := range results {
-		content := strings.ReplaceAll(r.Content, `\`, `\\`)
-		content = strings.ReplaceAll(content, `"`, `\"`)
-		content = strings.ReplaceAll(content, "\n", `\n`)
-		content = strings.ReplaceAll(content, "\r", `\r`)
-		toolUseID := strings.ReplaceAll(r.ToolUseID, `"`, `\"`)
-		parts = append(parts, fmt.Sprintf(`{"type":"tool_result","tool_use_id":"%s","content":"%s"}`, toolUseID, content))
+	type block struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+		Content   string `json:"content"`
 	}
-	return "[" + strings.Join(parts, ",") + "]"
+	blocks := make([]block, len(results))
+	for i, r := range results {
+		blocks[i] = block{Type: "tool_result", ToolUseID: r.ToolUseID, Content: r.Content}
+	}
+	b, err := json.Marshal(blocks)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // ListSessions returns the IDs of all active sessions.
@@ -678,6 +704,18 @@ type AskRequest struct {
 // before retrying in this case.
 func isContentFilterError(err error) bool {
 	return strings.Contains(err.Error(), "content filtering policy")
+}
+
+// isToolUseHistoryError returns true when the API rejected the request because
+// the conversation history has tool_use blocks without corresponding tool_result
+// blocks (or vice versa). This indicates corrupted session history that should
+// be reset so the user can continue.
+func isToolUseHistoryError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "tool_use` ids were found without `tool_result`") ||
+		strings.Contains(msg, "tool_result` blocks found without a corresponding `tool_use`") ||
+		strings.Contains(msg, "tool_use ids were found without tool_result") ||
+		strings.Contains(msg, "tool_result blocks found without a corresponding tool_use")
 }
 
 // Errors
