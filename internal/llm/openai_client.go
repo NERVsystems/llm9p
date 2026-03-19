@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -734,6 +736,18 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 		return AskResponse{Response: responseText, Tokens: totalTokens}, nil
 	}
 
+	// Fallback: if the model generated tool calls as text instead of structured API calls,
+	// parse them from the content and treat them as proper tool calls.
+	if len(toolCalls) == 0 && responseText != "" && len(req.ToolDefs) > 0 {
+		remaining, extracted := extractTextToolCalls(responseText, req.ToolDefs)
+		if len(extracted) > 0 {
+			fmt.Fprintf(os.Stderr, "llm9p: fallback text tool-call parser extracted %d tool call(s) from content\n", len(extracted))
+			toolCalls = extracted
+			responseText = strings.TrimSpace(remaining)
+			finishReason = openai.FinishReasonToolCalls
+		}
+	}
+
 	// Tool mode: format STOP: response and build structured JSON for history
 	var textParts []string
 	var toolCallEntries []struct{ id, name, args string }
@@ -777,6 +791,113 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 	sb.WriteString(strings.Join(textParts, ""))
 
 	return AskResponse{Response: sb.String(), StructuredJSON: structuredJSON, Tokens: totalTokens}, nil
+}
+
+// extractTextToolCalls scans content for tool calls encoded as text (common when
+// Ollama/Qwen models don't use the structured tool_calls API). It recognises three
+// formats:
+//
+//  1. <function=toolname>\n<parameter=args>\nvalue\n</parameter>\n</function>
+//  2. <tool_call>\n{"name": "toolname", "arguments": {...}}\n</tool_call>
+//  3. <|tool_call|>\n{"name": "toolname", "arguments": {...}}\n<|/tool_call|>
+//
+// Returns the remaining non-tool-call text and a slice of synthetic openai.ToolCall.
+func extractTextToolCalls(content string, toolDefs []ToolDef) (string, []openai.ToolCall) {
+	// Fast path: skip regex work when no markers are present.
+	if !strings.Contains(content, "<function=") &&
+		!strings.Contains(content, "<tool_call>") &&
+		!strings.Contains(content, "<|tool_call|>") {
+		return content, nil
+	}
+
+	// Build set of valid tool names for validation.
+	validTools := make(map[string]bool, len(toolDefs))
+	for _, td := range toolDefs {
+		validTools[td.Name] = true
+	}
+
+	var toolCalls []openai.ToolCall
+	remaining := content
+
+	// --- Format 1: <function=toolname>\n<parameter=args>\nvalue\n</parameter>\n</function> ---
+	reFn := regexp.MustCompile(`(?s)<function=([^>]+)>\s*<parameter=([^>]+)>\s*(.*?)\s*</parameter>\s*</function>`)
+	remaining = reFn.ReplaceAllStringFunc(remaining, func(match string) string {
+		m := reFn.FindStringSubmatch(match)
+		if m == nil {
+			return match
+		}
+		name := strings.TrimSpace(m[1])
+		paramName := strings.TrimSpace(m[2])
+		paramValue := strings.TrimSpace(m[3])
+		if !validTools[name] {
+			return match // leave hallucinated tool calls as-is
+		}
+		argsJSON, _ := json.Marshal(map[string]string{paramName: paramValue})
+		idx := len(toolCalls)
+		toolCalls = append(toolCalls, openai.ToolCall{
+			Index: &idx,
+			ID:    fmt.Sprintf("fallback_%d", idx),
+			Type:  openai.ToolTypeFunction,
+			Function: openai.FunctionCall{
+				Name:      name,
+				Arguments: string(argsJSON),
+			},
+		})
+		return ""
+	})
+
+	// --- Format 2 & 3: <tool_call> or <|tool_call|> wrapping JSON ---
+	reTC := regexp.MustCompile(`(?s)(?:<\|tool_call\|>|<tool_call>)\s*(\{.*?\})\s*(?:</tool_call>|<\|/tool_call\|>)`)
+	remaining = reTC.ReplaceAllStringFunc(remaining, func(match string) string {
+		m := reTC.FindStringSubmatch(match)
+		if m == nil {
+			return match
+		}
+		raw := strings.TrimSpace(m[1])
+
+		var parsed struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return match
+		}
+		if !validTools[parsed.Name] {
+			return match
+		}
+
+		// Normalize arguments: if it's already a JSON object/string, keep as-is;
+		// if it's a raw string, marshal it so it becomes a valid JSON string.
+		argsStr := string(parsed.Arguments)
+		if len(argsStr) == 0 {
+			argsStr = "{}"
+		} else if argsStr[0] != '{' && argsStr[0] != '"' {
+			// Shouldn't normally happen, but handle gracefully.
+			argsStr = "{}"
+		} else if argsStr[0] == '{' {
+			// Already an object — use as-is.
+		} else {
+			// It's a JSON string — the server sent arguments as a string.
+			var s string
+			if err := json.Unmarshal(parsed.Arguments, &s); err == nil {
+				argsStr = s
+			}
+		}
+
+		idx := len(toolCalls)
+		toolCalls = append(toolCalls, openai.ToolCall{
+			Index: &idx,
+			ID:    fmt.Sprintf("fallback_%d", idx),
+			Type:  openai.ToolTypeFunction,
+			Function: openai.FunctionCall{
+				Name:      parsed.Name,
+				Arguments: argsStr,
+			},
+		})
+		return ""
+	})
+
+	return remaining, toolCalls
 }
 
 // buildOpenAITools converts ToolDef slice to OpenAI SDK tool params.
