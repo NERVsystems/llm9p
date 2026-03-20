@@ -356,10 +356,17 @@ func buildChatMessages(systemPrompt string, msgs []Message) []openai.ChatComplet
 	for _, msg := range msgs {
 		switch msg.Role {
 		case "user":
-			apiMsgs = append(apiMsgs, openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleUser,
-				Content: msg.Content,
-			})
+			if msg.StructuredContent != "" {
+				// User message with structured content = tool results.
+				// Expand into individual {"role":"tool"} messages.
+				toolMsgs := rebuildToolResultMessages(msg)
+				apiMsgs = append(apiMsgs, toolMsgs...)
+			} else {
+				apiMsgs = append(apiMsgs, openai.ChatCompletionMessage{
+					Role:    openai.ChatMessageRoleUser,
+					Content: msg.Content,
+				})
+			}
 		case "assistant":
 			// Check if this message has structured content with tool calls
 			if msg.StructuredContent != "" {
@@ -422,6 +429,46 @@ func rebuildAssistantToolMessage(msg Message) openai.ChatCompletionMessage {
 	}
 
 	return apiMsg
+}
+
+// rebuildToolResultMessages converts a user-role message with Anthropic-format
+// tool_result structured content into OpenAI-format {"role":"tool"} messages.
+func rebuildToolResultMessages(msg Message) []openai.ChatCompletionMessage {
+	type rawBlock struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+		Content   string `json:"content"`
+	}
+
+	var blocks []rawBlock
+	if err := json.Unmarshal([]byte(msg.StructuredContent), &blocks); err != nil {
+		// Fallback to plain user message
+		return []openai.ChatCompletionMessage{{
+			Role:    openai.ChatMessageRoleUser,
+			Content: msg.Content,
+		}}
+	}
+
+	var msgs []openai.ChatCompletionMessage
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			continue
+		}
+		msgs = append(msgs, openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Content:    b.Content,
+			ToolCallID: b.ToolUseID,
+		})
+	}
+
+	if len(msgs) == 0 {
+		// No tool_result blocks found; fallback to plain user message
+		return []openai.ChatCompletionMessage{{
+			Role:    openai.ChatMessageRoleUser,
+			Content: msg.Content,
+		}}
+	}
+	return msgs
 }
 
 // Ask sends a prompt to the LLM and returns the response.
@@ -760,8 +807,9 @@ func (c *OpenAIClient) AskWithRequest(ctx context.Context, req AskRequest) (AskR
 	}
 
 	for _, tc := range toolCalls {
+		args := extractToolArgs(json.RawMessage(tc.Function.Arguments))
 		toolCallEntries = append(toolCallEntries, struct{ id, name, args string }{
-			tc.ID, tc.Function.Name, tc.Function.Arguments,
+			tc.ID, tc.Function.Name, args,
 		})
 		inputJSON := tc.Function.Arguments
 		if inputJSON == "" {
