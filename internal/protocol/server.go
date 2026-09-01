@@ -63,6 +63,15 @@ func (s *Server) ServeConn(conn net.Conn) {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	// Connections are served from bare goroutines, so an unrecovered panic
+	// anywhere below would take the whole process with it. Input here comes
+	// off an untrusted socket; contain the blast radius to one client.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic serving %v: %v", conn.RemoteAddr(), r)
+		}
+	}()
+
 	state := &clientState{
 		fids:  make(map[uint32]File),
 		msize: MaxMessageSize,

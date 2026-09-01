@@ -125,6 +125,12 @@ func DecodeTwalk(buf []byte) (*TwalkMsg, error) {
 		Newfid: binary.LittleEndian.Uint32(buf[4:8]),
 	}
 	nwname := binary.LittleEndian.Uint16(buf[8:10])
+	// 9P2000 caps a walk at MAXWELEM elements. Without this a client can
+	// claim 65535 names in a 10-byte message and make the server allocate
+	// for all of them.
+	if int(nwname) > MaxWElem {
+		return nil, fmt.Errorf("Twalk: nwname %d exceeds MAXWELEM %d", nwname, MaxWElem)
+	}
 	m.Names = make([]string, nwname)
 	n := 10
 	for i := range m.Names {

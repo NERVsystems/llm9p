@@ -28,6 +28,10 @@ const (
 	// own msize; the negotiated size is min(client, server).
 	MaxMessageSize = 65536
 
+	// MaxWElem is 9P2000's MAXWELEM: the most path elements one Twalk may
+	// carry. Clients needing to walk deeper issue successive walks.
+	MaxWElem = 16
+
 	// NoTag is used for Tversion/Rversion which don't use tags
 	NoTag uint16 = 0xFFFF
 
