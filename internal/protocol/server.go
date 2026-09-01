@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -134,9 +135,31 @@ func (s *Server) handleMessage(state *clientState, msgType uint8, payload []byte
 		return s.handleStat(state, payload, buf)
 	case Tflush:
 		return s.handleFlush(state, payload, buf)
+	case Twstat:
+		return s.handleWstat(state, payload, buf)
 	default:
 		return s.errorResponse(buf, fmt.Sprintf("unknown message type: %d", msgType))
 	}
+}
+
+// handleWstat accepts and ignores metadata changes.
+//
+// A synthetic filesystem has no meaningful mtime, owner or length to set, but
+// the message cannot simply be rejected: opening a file with O_TRUNC - which
+// is what a plain shell redirect does - makes the Linux 9P client send a
+// Twstat setting length 0 before any Twrite. Without this handler the server
+// answers "unknown message type" and `echo hello > /mnt/llm/ask` fails.
+func (s *Server) handleWstat(state *clientState, payload []byte, buf []byte) ([]byte, uint8) {
+	if len(payload) < 4 {
+		return s.errorResponse(buf, "wstat: short message")
+	}
+	fid := binary.LittleEndian.Uint32(payload[0:4])
+	if _, exists := state.fids[fid]; !exists {
+		return s.errorResponse(buf, ErrBadFid.Error())
+	}
+
+	// Rwstat carries only the tag, which the caller frames.
+	return buf[:0], Rwstat
 }
 
 func (s *Server) errorResponse(buf []byte, msg string) ([]byte, uint8) {
